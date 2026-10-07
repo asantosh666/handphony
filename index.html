@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Handphony — week-1 spike</title>
+<style>
+  html, body {
+    margin: 0; height: 100%; background: #020204; overflow: hidden;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  #app { position: fixed; inset: 0; }
+  #app canvas { display: block; }
+  #enter {
+    position: fixed; inset: 0; z-index: 10; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; color: #e8ecff;
+    background: radial-gradient(ellipse at 50% 42%, #0b1030 0%, #04050c 62%, #010102 100%);
+  }
+  #enter.hidden { display: none; }
+  #enter h1 {
+    margin: 0 0 10px; font-size: 44px; font-weight: 200;
+    letter-spacing: 0.42em; text-indent: 0.42em; color: #f2f4ff;
+    text-shadow: 0 0 26px rgba(140, 170, 255, 0.55);
+  }
+  #enter p { margin: 6px 0; }
+  #enter .sub { opacity: 0.62; font-size: 15px; letter-spacing: 0.08em; }
+  #status { margin-top: 26px !important; font-size: 17px; color: #bcd0ff; }
+  #enter .hint { margin-top: 34px !important; font-size: 12px; opacity: 0.38; letter-spacing: 0.14em; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="enter">
+    <h1>HANDPHONY</h1>
+    <p class="sub">a hands-first symphony &middot; week-1 spike</p>
+    <p id="status">Tap to enter VR</p>
+    <p class="hint">SEATED &middot; HANDS ONLY &middot; QUEST BROWSER</p>
+  </div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
