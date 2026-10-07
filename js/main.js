@@ -1,5 +1,11 @@
-// Handphony — week-1 spike. Hands-first WebXR conducting.
-// Right hand height -> pentatonic melody (C4..C6, 11 zones).
+// Handphony — hands-first WebXR conducting (core mechanic redesigned
+// after playtest 2: zone triggers felt like tiring whole-arm button
+// presses, so the instrument is now a theremin).
+// Right hand height -> CONTINUOUS quantized pitch: a 0.40m window
+//   auto-centers once on the relaxed hand; height maps continuously to
+//   11 pentatonic notes (C4..C6) with a ~70ms portamento glide. The voice
+//   sustains while the hand is tracked; note EVENTS fire only when the
+//   quantized note changes (particles, ladder, loop capture).
 // Right pinch      -> capture last phrase as a looping arpeggio / clear it.
 // Left hand height -> pad chords: low = I (C), mid = vi (Am),
 //                     high = IV (F) / V (G), alternating on each fresh entry.
@@ -37,25 +43,28 @@ let dtG = 0.016;
 let sessionT0 = 0;
 let htNagShown = false;
 let handsEverSeen = false;
+let rightLastSeen = -1e9;   // nowS of the last tracked right-hand frame
+let melodyLive = false;     // sustained voice has started this session
 const tmpColor = new THREE.Color();
 
-// ---- guided onboarding (~60s, auto-advancing) -------------------------
+// ---- guided onboarding (rewritten for the theremin mechanic) -----------
 // One large floating instruction at a time (reuses the prompt sprite at
 // 1.6x). Starts on the first frame with a tracked hand — never at an
-// empty room. Each step advances on its gesture, flashes a confirmation,
-// then moves on. Skip: pinch-and-HOLD 1.5s at any point -> free play.
-let ob = null;    // {step, phase, until, down, lastZone, noteUntil}
+// empty room. The first two steps teach the continuous-pitch feel:
+// move and HEAR the mapping, then explore tiny movements. Skip:
+// pinch-and-HOLD 1.5s at any point -> free play.
+let ob = null;    // {step, phase, until, count, noteUntil}
 let obDone = false;
 const OB_STEPS = [
-  { instr: 'Raise your right hand', conf: 'Higher hand, higher note' },
-  { instr: 'Now lower it slowly', conf: 'Lower hand, lower note' },
+  { instr: 'Move your hand slowly up and down', conf: 'You are the pitch' },
+  { instr: 'Tiny movements — your hand is the pitch', conf: null }, // 4s free explore, auto-advance
   { instr: 'Open your left palm', conf: 'Your palm swells the strings' },
   { instr: 'Make a fist', conf: 'A fist hushes them' },
   { instr: 'Pinch thumb and finger', conf: 'You captured a loop' },
 ];
 
 function obStart() {
-  ob = { step: 0, phase: 'instr', until: 0, down: 0, lastZone: -1, noteUntil: 0 };
+  ob = { step: 0, phase: 'instr', until: 0, count: 0, noteUntil: 0 };
   visuals.setPromptBig();
   visuals.showPrompt();
   visuals.setPromptText(OB_STEPS[0].instr);
@@ -76,7 +85,7 @@ function obNext(nowS) {
   } else {
     ob.phase = 'instr';
     visuals.setPromptText(OB_STEPS[ob.step].instr);
-    if (ob.step === 1) { ob.down = 0; ob.lastZone = -1; }
+    if (ob.step === 1) ob.until = nowS + 4.0; // timed free explore
     // Already looping from an early pinch -> treat the pinch step as done.
     if (ob.step === 4 && audio.looping) obAdvance(nowS);
   }
@@ -94,6 +103,8 @@ function obTick(nowS) {
     ob.noteUntil = 0;
     if (ob.phase === 'instr') visuals.setPromptText(OB_STEPS[ob.step].instr);
   }
+  // Step 1 (tiny movements): 4s of free explore, then auto-advance.
+  if (ob.phase === 'instr' && ob.step === 1 && nowS >= ob.until) { obNext(nowS); return; }
   if (ob.phase === 'confirm' && nowS >= ob.until) obNext(nowS);
   else if (ob.phase === 'conduct' && nowS >= ob.until) {
     ob = null;
@@ -164,6 +175,15 @@ async function enter() {
     setStatus('Tap to re-enter');
     visuals.hideHandViz('left');
     visuals.hideHandViz('right');
+    audio.setMelodyLevel(0);
+    // Fresh auto-center + silent voice start on the next session.
+    for (const tr of trackers.values()) {
+      tr.centered = false;
+      tr.noteIdx = -1;
+      tr.ySm = 0;
+    }
+    rightLastSeen = -1e9;
+    melodyLive = false;
     renderer.setAnimationLoop(null);
   });
   lastT = performance.now();
@@ -172,34 +192,36 @@ async function enter() {
 
 function getTracker(h) {
   if (!trackers.has(h)) {
-    // 'local' space: origin ~ headset. Seated hand range roughly [-0.45, +0.55].
-    // Bounds expand outward only as the user moves (per-hand calibration).
+    // Right hand: continuous theremin mode — the 0.40m window auto-centers
+    // on the first tracked frame, so lo/hi are unused (zeros).
+    // Left hand: 3 chord zones with expand-only bounds ('local' space,
+    // origin ~ headset; seated hand range roughly [-0.45, +0.55]).
     const tr = h === 'right'
-      ? new HandTracker(h, 11, -0.45, 0.55, -0.7, 0.9)
+      ? new HandTracker(h, 11, 0, 0, 0, 0, true)
       : new HandTracker(h, 3, -0.45, 0.55, -0.7, 0.9);
     trackers.set(h, tr);
-    if (h === 'right') visuals.setLadderRange(tr.lo, tr.hi);
+    if (h === 'right') visuals.setLadderRange(-0.2, 0.2); // placeholder until auto-center
   }
   return trackers.get(h);
 }
 
 function handleRight(tr, ev, nowS) {
-  const color = pitchColor(ev.zone, 11, tmpColor);
-  visuals.setLadderRange(tr.lo, tr.hi);
-  visuals.setLadderActive(ev.zone, color);
+  // Continuous quantized pitch (theremin principle): the voice sustains
+  // while the hand is tracked and glides between quantized notes.
+  // Note EVENTS fire only when the quantized note changes — these drive
+  // particles, the ladder, and the 8s loop capture. No zone triggers,
+  // no dwell: the hand IS the pitch.
+  const color = pitchColor(ev.noteIdx, 11, tmpColor);
+  visuals.setLadderRange(tr.winLo, tr.winHi);
+  visuals.setLadderActive(ev.noteIdx, color);
 
-  // Onboarding: track downward travel for the "lower it slowly" step.
-  if (ob && ob.phase === 'instr' && ob.step === 1) {
-    if (ev.zoneChanged && ob.lastZone >= 0 && ev.zone < ob.lastZone) {
-      ob.down += ob.lastZone - ev.zone;
-      if (ob.down >= 3) obAdvance(nowS);
-    }
-    ob.lastZone = ev.zone;
-  }
+  audio.setMelodyNote(PENT_MIDIS[ev.noteIdx], !melodyLive);
+  melodyLive = true;
+  audio.setMelodyLevel(1);
+  rightLastSeen = nowS;
 
-  if (ev.zoneChanged) {
-    const midi = PENT_MIDIS[ev.zone];
-    audio.playMelody(midi);
+  if (ev.noteChanged) {
+    const midi = PENT_MIDIS[ev.noteIdx];
     const now = audio.ctx.currentTime;
     noteHistory.push({ midi, t: now });
     noteHistory = noteHistory.filter(n => now - n.t < 8);
@@ -207,9 +229,11 @@ function handleRight(tr, ev, nowS) {
     visuals.spawnBurst(tr.pos, color);
     visuals.spawnRipple(tr.pos, color);
     visuals.flashPitchCursor();
-    melAmp = 1;
-    if (ob && ob.phase === 'instr' && ob.step === 0) obAdvance(nowS);
-    else if (!ob) visuals.hidePrompt();
+    // Onboarding step 0: two quantized changes prove they hear the mapping.
+    if (ob && ob.phase === 'instr' && ob.step === 0) {
+      ob.count++;
+      if (ob.count >= 2) obAdvance(nowS);
+    }
   }
 
   // Onboarding skip: pinch-and-hold 1.5s jumps straight to free play.
@@ -288,13 +312,15 @@ function tick(time, frame) {
       if (!ev.tracked) continue;
       handsEverSeen = true;
       seen[h] = true;
-      visuals.setHandViz(h, tr.jointPos, tr.jointCount, tr.pos);
+      visuals.setHandViz(h, tr.jointPos, tr.jointValid, tr.pos);
       if (h === 'right') {
         visuals.setPitchCursor(tr.pos.y);
         handleRight(tr, ev, nowS);
       } else handleLeft(tr, ev, nowS);
     }
     for (const h of ['left', 'right']) if (!seen[h]) visuals.hideHandViz(h);
+    // Sustained melody fades out when the right hand is lost (>0.4s untracked).
+    if (nowS - rightLastSeen > 0.4) audio.setMelodyLevel(0);
     // Onboarding starts on the first frame with a tracked hand.
     if (!ob && !obDone && handsEverSeen) obStart();
     if (ob) obTick(nowS);

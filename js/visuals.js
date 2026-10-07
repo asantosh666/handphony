@@ -4,6 +4,7 @@
 
 import * as THREE from 'three';
 import { NOTE_NAMES } from './audio.js';
+import { HAND_BONES } from './hands.js';
 
 function canvasTexture(w, h, draw) {
   const cv = document.createElement('canvas');
@@ -47,8 +48,8 @@ export class Visuals {
     this._c = new THREE.Color();
     this._v = new THREE.Vector3();
     this.dotTex = makeDotTexture();
-    this.ladderLo = -0.45;
-    this.ladderHi = 0.55;
+    this.ladderLo = -0.2;
+    this.ladderHi = 0.2;
 
     this.buildDust();
     this.buildStage();
@@ -247,11 +248,13 @@ export class Visuals {
     }
   }
 
-  // ---- pitch ladder: fixed in view, beam + 11 rungs + note name ------
+  // ---- pitch ladder: a small reference panel, not a wall --------------
+  // Fixed at (0.35, 0.02, -1.25), scaled 0.55: beam + 11 rungs + note name
+  // + the cursor ring riding at the right hand's height.
   buildLadder() {
     this.ladder = new THREE.Group();
-    // Fixed position: comfortably in view, no hand-following.
-    this.ladder.position.set(0.45, 0, -1.5);
+    this.ladder.position.set(0.35, 0.02, -1.25);
+    this.ladder.scale.set(0.55, 0.55, 0.55);
     const beamMat = new THREE.MeshBasicMaterial({
       color: 0x8fa8ff, transparent: true, opacity: 0.45,
       blending: THREE.AdditiveBlending, depthWrite: false,
@@ -396,11 +399,14 @@ export class Visuals {
 
   // ---- hand visualization --------------------------------------------
   // WebXR never renders hands automatically — the app must. Each tracked
-  // hand gets its 25 XRHand joints as glowing points (gold = right/melody,
-  // teal = left/harmony, which also teaches the mapping) plus a soft palm
-  // orb for presence. Hidden when the hand isn't tracked.
+  // hand gets its 25 XRHand joints as glowing points PLUS bone skeletons
+  // (THREE.LineSegments over the standard hand topology) so it reads
+  // INSTANTLY as a hand, not a bead swarm — plus a soft palm orb for
+  // presence. Gold = right/melody, teal = left/harmony, which also teaches
+  // the mapping. Hidden when the hand isn't tracked.
   buildHandViz() {
     this.handPts = {};
+    this.handBones = {};
     this.palmOrbs = {};
     const cols = { right: 0xffd27f, left: 0x9fe8d0 };
     for (const h of ['right', 'left']) {
@@ -415,6 +421,17 @@ export class Visuals {
       pts.visible = false;
       this.scene.add(pts);
       this.handPts[h] = pts;
+      const lg = new THREE.BufferGeometry();
+      lg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(HAND_BONES.length * 6), 3));
+      const lm = new THREE.LineBasicMaterial({
+        color: cols[h], transparent: true, opacity: 0.5,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      });
+      const bones = new THREE.LineSegments(lg, lm);
+      bones.frustumCulled = false;
+      bones.visible = false;
+      this.scene.add(bones);
+      this.handBones[h] = bones;
       const orb = new THREE.Sprite(new THREE.SpriteMaterial({
         map: this.dotTex, color: cols[h], transparent: true, opacity: 0.5,
         blending: THREE.AdditiveBlending, depthWrite: false,
@@ -426,19 +443,53 @@ export class Visuals {
     }
   }
 
-  setHandViz(h, jointArr, count, palmPos) {
-    const pts = this.handPts[h];
-    if (count < 8) { pts.visible = false; this.palmOrbs[h].visible = false; return; }
+  // jointPos: fixed-index joint positions (25*3); jointValid: per-joint mask.
+  setHandViz(h, jointPos, jointValid, palmPos) {
+    const pts = this.handPts[h], bones = this.handBones[h];
+    let n = 0;
+    for (let i = 0; i < 25; i++) if (jointValid[i]) n++;
+    if (n < 8) {
+      pts.visible = false; bones.visible = false; this.palmOrbs[h].visible = false;
+      return;
+    }
+    // Compact the valid joints into the point buffer.
     const attr = pts.geometry.attributes.position;
-    attr.array.set(jointArr.subarray(0, count * 3));
+    let c = 0;
+    for (let i = 0; i < 25; i++) {
+      if (!jointValid[i]) continue;
+      attr.array[c * 3] = jointPos[i * 3];
+      attr.array[c * 3 + 1] = jointPos[i * 3 + 1];
+      attr.array[c * 3 + 2] = jointPos[i * 3 + 2];
+      c++;
+    }
     attr.needsUpdate = true;
-    pts.geometry.setDrawRange(0, count);
+    pts.geometry.setDrawRange(0, c);
     pts.visible = true;
+    // Bone segments, skipping any pair with a missing joint.
+    const lattr = bones.geometry.attributes.position;
+    let s = 0;
+    for (const [a, b] of HAND_BONES) {
+      if (!jointValid[a] || !jointValid[b]) continue;
+      lattr.array[s * 3] = jointPos[a * 3];
+      lattr.array[s * 3 + 1] = jointPos[a * 3 + 1];
+      lattr.array[s * 3 + 2] = jointPos[a * 3 + 2];
+      lattr.array[s * 3 + 3] = jointPos[b * 3];
+      lattr.array[s * 3 + 4] = jointPos[b * 3 + 1];
+      lattr.array[s * 3 + 5] = jointPos[b * 3 + 2];
+      s += 2;
+    }
+    lattr.needsUpdate = true;
+    bones.geometry.setDrawRange(0, s);
+    bones.visible = s > 0;
     this.palmOrbs[h].position.copy(palmPos);
     this.palmOrbs[h].visible = true;
   }
 
-  hideHandViz(h) { this.handPts[h].visible = false; this.palmOrbs[h].visible = false; }
+  hideHandViz(h) {
+    this.handPts[h].visible = false;
+    this.handBones[h].visible = false;
+    this.palmOrbs[h].visible = false;
+  }
 
   // ---- pinch flash: bright pulse at the pinch point when a pinch ------
   // ---- registers, distinct from the loop ring. Pooled x3.

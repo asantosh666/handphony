@@ -1,9 +1,14 @@
 // Handphony — hand tracking via the WebXR Hand Input API.
-// Per-hand state: adaptive height bounds (expand-only), scale-degree zones
-// with 3cm boundary hysteresis, thumb-index pinch state machine
-// (25mm engage / 35mm release, 90ms debounce, 150ms double-fire guard),
-// and palm openness from fingertip-to-wrist distances (expand-only
-// calibration, ~120ms smoothing).
+// Right hand: CONTINUOUS pitch control (theremin principle). A 0.40m
+// vertical window auto-centers once per session on the relaxed hand height;
+// hand height maps continuously to the 11-note pentatonic set (quantized,
+// ~60ms smoothing kills boundary flutter from micro-tremor). Expand-only:
+// pushing past an edge grows that edge by 0.05m per frame, capped at
+// +0.10m per edge so the window can't bloat into fatigue.
+// Left hand: discrete chord zones (3cm hysteresis + 80ms dwell, unchanged).
+// Both: thumb-index pinch state machine (25mm engage / 35mm release,
+// 90ms debounce, 150ms double-fire guard), palm openness from
+// fingertip-to-wrist distances (expand-only calibration, ~120ms smoothing).
 
 import * as THREE from 'three';
 
@@ -33,15 +38,35 @@ const JOINT_NAMES = [
   'pinky-finger-metacarpal', 'pinky-finger-phalanx-proximal', 'pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal', 'pinky-finger-tip',
 ];
 
+// Bone topology as index pairs into JOINT_NAMES: wrist -> each finger's
+// metacarpal, then the joint chains, plus a palm fan across metacarpals.
+export const HAND_BONES = [
+  [0, 1], [1, 2], [2, 3], [3, 4],          // thumb
+  [0, 5], [5, 6], [6, 7], [7, 8], [8, 9],  // index
+  [0, 10], [10, 11], [11, 12], [12, 13], [13, 14], // middle
+  [0, 15], [15, 16], [16, 17], [17, 18], [18, 19], // ring
+  [0, 20], [20, 21], [21, 22], [22, 23], [23, 24], // pinky
+  [5, 10], [10, 15], [15, 20],             // palm fan
+];
+
 export class HandTracker {
-  // zones: number of discrete height zones; lo/hi: initial Y bounds (meters,
-  // 'local' reference space, origin ~ headset); loClamp/hiClamp: hard limits.
-  constructor(handedness, zones, lo, hi, loClamp, hiClamp) {
+  // zones: number of discrete height zones (left hand chords).
+  // lo/hi + loClamp/hiClamp: expand-only Y bounds, left hand only.
+  // continuous: right-hand theremin mode (0.40m auto-centering window).
+  constructor(handedness, zones, lo, hi, loClamp, hiClamp, continuous = false) {
     this.handedness = handedness;
     this.zones = zones;
     this.lo = lo; this.hi = hi;
     this.loClamp = loClamp; this.hiClamp = hiClamp;
+    this.continuous = continuous;
     this.zone = -1;
+    // Continuous pitch window (right hand): auto-centered once on the
+    // relaxed hand; edges expand-only, capped at +0.10m per edge.
+    this.centered = false;
+    this.winLo = 0; this.winHi = 0;
+    this.winLo0 = 0; this.winHi0 = 0;
+    this.ySm = 0;
+    this.noteIdx = -1;
     this.tracked = false;
     this.pos = new THREE.Vector3();
     this._a = new THREE.Vector3();
@@ -63,13 +88,15 @@ export class HandTracker {
     this.pinchHeld = false;
     this.pinchPos = new THREE.Vector3();
     this.pinchPosValid = false;
-    // Joint constellation for hand visualization (25 XRHand joints).
+    // Joint data for hand visualization: FIXED indices into JOINT_NAMES
+    // (never compacted, so bone topology stays valid) + a validity mask.
     this.jointPos = new Float32Array(25 * 3);
+    this.jointValid = new Uint8Array(25);
     this.jointCount = 0;
   }
 
   update(src, frame, refSpace, now, dt) {
-    const ev = { zoneChanged: false, zone: -1, pinched: false, pinchHeld: false, openness: this.openness, tracked: false };
+    const ev = { zoneChanged: false, zone: -1, noteChanged: false, noteIdx: -1, pinched: false, pinchHeld: false, openness: this.openness, tracked: false };
     if (!src.hand) return ev;
 
     const wrist = jointPos(src.hand, frame, refSpace, 'wrist', this._a);
@@ -81,52 +108,88 @@ export class HandTracker {
     this.pos.copy(palm || wrist);
     const y = this.pos.y;
 
-    // Adaptive height bounds: expand outward only, never shrink (stable zones).
-    if (y < this.lo) this.lo = Math.max(y, this.loClamp);
-    if (y > this.hi) this.hi = Math.min(y, this.hiClamp);
+    // Adaptive height bounds (left hand only): expand outward only,
+    // never shrink (stable chord zones).
+    if (!this.continuous) {
+      if (y < this.lo) this.lo = Math.max(y, this.loClamp);
+      if (y > this.hi) this.hi = Math.min(y, this.hiClamp);
+    }
 
-    // Joint constellation for the hand-visualization points (compact prefix).
+    // Joint data at FIXED indices (bone topology stays valid) + validity.
     let jc = 0;
     for (let i = 0; i < JOINT_NAMES.length; i++) {
       const j = src.hand.get(JOINT_NAMES[i]);
       const p = j ? frame.getJointPose(j, refSpace) : null;
       if (p) {
         const v = p.transform.position;
-        this.jointPos[jc * 3] = v.x;
-        this.jointPos[jc * 3 + 1] = v.y;
-        this.jointPos[jc * 3 + 2] = v.z;
+        this.jointPos[i * 3] = v.x;
+        this.jointPos[i * 3 + 1] = v.y;
+        this.jointPos[i * 3 + 2] = v.z;
+        this.jointValid[i] = 1;
         jc++;
+      } else {
+        this.jointValid[i] = 0;
       }
     }
     this.jointCount = jc;
 
-    // Zone with 3cm hysteresis on the boundary + 80ms dwell: a new zone
-    // only commits once the hand has stayed past the boundary for 80ms,
-    // which kills machine-gun notes from hand waver.
-    const span = this.hi - this.lo;
-    let raw = Math.floor(((y - this.lo) / span) * this.zones);
-    raw = Math.max(0, Math.min(this.zones - 1, raw));
-    if (this.zone < 0) {
-      this.zone = raw;
-      this.pendingZone = -1;
-    } else if (raw !== this.zone) {
-      const boundary = this.lo + (Math.max(raw, this.zone) * span) / this.zones;
-      if (Math.abs(y - boundary) >= 0.03) {
-        if (this.pendingZone !== raw) {
-          this.pendingZone = raw;
-          this.pendingT = now;
-        } else if (now - this.pendingT >= 0.08) {
-          this.zone = raw;
+    if (this.continuous) {
+      // Continuous pitch window: auto-center ONCE on the relaxed hand
+      // height, then map height continuously to the note set (quantized).
+      // Edges expand-only (+0.05m/frame toward the hand, capped at +0.10m
+      // per edge) so the mapping can't drift into fatigue.
+      if (!this.centered) {
+        this.winLo = this.winLo0 = y - 0.20;
+        this.winHi = this.winHi0 = y + 0.20;
+        this.centered = true;
+        this.ySm = y;
+      } else {
+        if (y < this.winLo) this.winLo = Math.max(y, this.winLo - 0.05, this.winLo0 - 0.10);
+        if (y > this.winHi) this.winHi = Math.min(y, this.winHi + 0.05, this.winHi0 + 0.10);
+      }
+      // ~60ms smoothing: micro-tremor can't flutter the quantization
+      // boundary; the audio portamento glide covers the lag.
+      const k = 1 - Math.exp(-dt / 0.06);
+      this.ySm += (y - this.ySm) * k;
+      const span = Math.max(1e-4, this.winHi - this.winLo);
+      const t = Math.max(0, Math.min(1, (this.ySm - this.winLo) / span));
+      const idx = Math.round(t * (this.zones - 1));
+      if (this.noteIdx < 0) {
+        this.noteIdx = idx; // first frame: adopt silently, no event
+      } else if (idx !== this.noteIdx) {
+        this.noteIdx = idx;
+        ev.noteChanged = true;
+      }
+      ev.noteIdx = this.noteIdx;
+    } else {
+      // Zone with 3cm hysteresis on the boundary + 80ms dwell: a new zone
+      // only commits once the hand has stayed past the boundary for 80ms,
+      // which kills machine-gun chord changes from hand waver.
+      const span = this.hi - this.lo;
+      let raw = Math.floor(((y - this.lo) / span) * this.zones);
+      raw = Math.max(0, Math.min(this.zones - 1, raw));
+      if (this.zone < 0) {
+        this.zone = raw;
+        this.pendingZone = -1;
+      } else if (raw !== this.zone) {
+        const boundary = this.lo + (Math.max(raw, this.zone) * span) / this.zones;
+        if (Math.abs(y - boundary) >= 0.03) {
+          if (this.pendingZone !== raw) {
+            this.pendingZone = raw;
+            this.pendingT = now;
+          } else if (now - this.pendingT >= 0.08) {
+            this.zone = raw;
+            this.pendingZone = -1;
+            ev.zoneChanged = true;
+          }
+        } else {
           this.pendingZone = -1;
-          ev.zoneChanged = true;
         }
       } else {
         this.pendingZone = -1;
       }
-    } else {
-      this.pendingZone = -1;
+      ev.zone = this.zone;
     }
-    ev.zone = this.zone;
 
     // Pinch: thumb-tip to index-tip distance.
     const th = jointPos(src.hand, frame, refSpace, 'thumb-tip', this._b);

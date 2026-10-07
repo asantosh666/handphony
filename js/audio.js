@@ -1,6 +1,12 @@
 // Handphony — audio engine. All synthesized, no samples.
 // Chain: voices -> master gain -> DynamicsCompressor (gentle limiter)
 //        -> dry to destination, plus parallel convolver reverb (wet ~0.33).
+// Melody (theremin principle): a SUSTAINED voice — two detuned oscillators
+// (triangle + sine) through a gentle lowpass with a subtle slow tremolo.
+// Hand height drives pitch continuously, quantized to the pentatonic set
+// with a ~70ms portamento glide between notes. The voice fades in when play
+// begins and sustains while the hand is tracked; note EVENTS (for particles,
+// ladder, loop capture) fire only when the quantized note index changes.
 // Musical safety: pentatonic melody, consonant triad pads, sine sub-bass.
 // Nothing dissonant is reachable by design.
 
@@ -11,7 +17,8 @@ export class AudioEngine {
   constructor() {
     this.ctx = null;
     this.ready = false;
-    this.melPulse = 0;   // set to 1 on melody onset; main loop consumes
+    this.melPulse = 0;   // set to 1 when the quantized note changes; main loop consumes
+    this.melVoice = null; // sustained theremin voice nodes
     this.loopPulse = 0;  // set to 1 on loop-note onset
     this.bassPulse = 0;  // set to 1 on chord change
     this.loop = null;    // {notes:[{midi,dt}], idx, t0, total}
@@ -47,7 +54,7 @@ export class AudioEngine {
     this.verb.connect(this.wet);
     this.wet.connect(c.destination);
 
-    // Melody bus: triangle lead through a fixed gentle lowpass.
+    // Melody bus: sustained theremin voice through a fixed gentle lowpass.
     this.melFilter = c.createBiquadFilter();
     this.melFilter.type = 'lowpass';
     this.melFilter.frequency.value = 2600;
@@ -97,25 +104,60 @@ export class AudioEngine {
     return buf;
   }
 
-  // Lead voice: two detuned triangles, fast attack, ~1.35s release.
-  playMelody(midi, vel = 1) {
-    if (!this.ready) return;
-    const c = this.ctx, t = c.currentTime, f = this.mtof(midi);
-    const g = c.createGain();
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.linearRampToValueAtTime(0.42 * vel, t + 0.008);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + 1.35);
-    g.connect(this.melFilter);
-    for (const det of [-5, 5]) {
+  // Sustained theremin voice, built lazily on first use. Two detuned
+  // oscillators (triangle + sine) -> voice gain -> slow tremolo -> melFilter.
+  ensureMelody() {
+    if (this.melVoice || !this.ready) return;
+    const c = this.ctx, t = c.currentTime;
+    const vGain = c.createGain();
+    vGain.gain.value = 0.0001;
+    const trem = c.createGain();
+    trem.gain.value = 1.0;
+    const lfo = c.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 4.5; // subtle slow tremolo
+    const lfoDepth = c.createGain();
+    lfoDepth.gain.value = 0.10;
+    lfo.connect(lfoDepth);
+    lfoDepth.connect(trem.gain);
+    lfo.start(t);
+    vGain.connect(trem);
+    trem.connect(this.melFilter);
+    const oscs = [];
+    for (const [type, det] of [['triangle', -6], ['sine', 7]]) {
       const o = c.createOscillator();
-      o.type = 'triangle';
-      o.frequency.value = f;
-      o.detune.value = det; // slight shimmer
-      o.connect(g);
+      o.type = type;
+      o.frequency.value = this.mtof(72); // C5; ramps to the hand's note
+      o.detune.value = det;
+      o.connect(vGain);
       o.start(t);
-      o.stop(t + 1.55);
+      oscs.push(o);
     }
-    this.melPulse = 1;
+    this.melVoice = { vGain, oscs };
+    this.melMidi = -1;
+  }
+
+  // Quantized note change: glide pitch (~70ms portamento) and fire the
+  // note EVENT that drives particles, ladder flash, and loop capture.
+  // quiet=true adopts the first note silently (no event on voice start).
+  setMelodyNote(midi, quiet = false) {
+    if (!this.ready) return;
+    this.ensureMelody();
+    if (!this.melVoice || midi === this.melMidi) return;
+    this.melMidi = midi;
+    const t = this.ctx.currentTime, f = this.mtof(midi);
+    for (const o of this.melVoice.oscs) o.frequency.setTargetAtTime(f, t, 0.023);
+    if (!quiet) this.melPulse = 1;
+  }
+
+  // Voice level: 1 = playing (gentle attack), 0 = silent (soft release).
+  setMelodyLevel(v) {
+    if (!this.ready) return;
+    this.ensureMelody();
+    if (!this.melVoice) return;
+    const t = this.ctx.currentTime;
+    this.melVoice.vGain.gain.setTargetAtTime(
+      Math.max(0.0001, 0.40 * v), t, v > 0.5 ? 0.18 : 0.25);
   }
 
   // Pad: 2 detuned saws per chord tone, slow attack, crossfaded on change.
