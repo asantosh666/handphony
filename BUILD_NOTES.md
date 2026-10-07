@@ -44,16 +44,17 @@ Module scripts + CDN imports require http(s), not `file://`.
 4. Enable hand tracking on the Quest if prompted (Settings → Movement).
 
 Inside: no menus, no buttons, no controllers. A guided tutorial starts on
-the first tracked hand — follow the floating instructions, then conduct.
-Your relaxed hand height becomes the middle of the instrument, so settle
-somewhere comfortable (elbow resting works) before you begin.
+the first tracked hand — follow the floating instructions, and you'll land
+in the songbook: pinch the golden orb and play Twinkle Twinkle with your
+bare hands. Your relaxed hand height becomes the middle of the instrument,
+so settle somewhere comfortable (elbow resting works) before you begin.
 
 ## Gesture → music map
 
 | Hand | Gesture | Result |
 |---|---|---|
 | Right | Raise / lower hand (small motions!) | Melody pitch, continuous: the hand IS the pitch. A 0.40m window auto-centers on your relaxed hand once per session; height glides through 11 quantized pentatonic notes (C4–C6: C D E G A) with ~70ms portamento. The voice sustains while tracked — tiny wrist movements sing. |
-| Right | Pinch thumb+index (25 mm engage / 35 mm release, 90 ms debounce) | Captures your last phrase (quantized note events from the previous 8 s) as a loop — replays as a soft arpeggio while a luminous ring orbits you at ~2 m; a "looping" label floats by the ring for 3 s. Pinch again to clear ("loop cleared"). Pinch-and-HOLD 1.5 s during onboarding skips straight to free play. |
+| Right | Pinch thumb+index (25 mm engage / 35 mm release, 90 ms debounce) | Quick pinch captures your last phrase (quantized note events from the previous 8 s) as a loop — replays as a soft arpeggio while a luminous ring orbits you at ~2 m; a "looping" label floats by the ring for 3 s. Pinch again to clear ("loop cleared"). In song mode the toggle fires on RELEASE so a hold can mean "quit to songbook" instead. Pinch-and-HOLD 1.5 s: onboarding → songbook · song select → hint only · song/free play → songbook · song complete → next song. |
 | Left | Hand height, 3 zones (low / mid / high) | Pad chord: low = I (C major), mid = vi (A minor), high = IV (F) / V (G), alternating on each fresh lift into the high zone. Bass follows the root an octave down. (3 cm hysteresis + 80 ms dwell retained here — chords shouldn't flutter.) |
 | Left | Open palm | Swell: pad lowpass opens (380 Hz → 4 kHz) and pad/bass level rises. |
 | Left | Fist | Dampens pad + bass to near silence. (Lead melody is unaffected.) |
@@ -62,23 +63,59 @@ Continuous mappings are smoothed (~60 ms pitch, ~120 ms swell). Everything
 is consonant by construction: pentatonic lead, triad pads, sine sub — you
 cannot play a wrong note.
 
-## Guided onboarding (rewritten for the theremin mechanic)
+## Guided onboarding → the songbook (redesigned after playtest 4)
 
 The first frame with a tracked hand starts a sequential tutorial — one large
 floating instruction at a time (the prompt sprite at 1.6×). It never runs at
-an empty room. The first two steps teach the continuous-pitch feel:
+an empty room. The first two steps teach the continuous-pitch feel. **The
+tutorial teaches gestures, never the why — so it now ENDS at the songbook,
+not at a loop.** The loop is deliberately not taught here; free play teaches
+it in context with a one-time intro instead.
 
 1. "Move your hand slowly up and down" → quantized note changes 2+ times → "You are the pitch"
-2. "Tiny movements — your hand is the pitch" → 4 s free explore, auto-advances
-3. "Open your left palm" → swell openness > 0.75 → "Your palm swells the strings"
+2. "Tiny movements:\nyour hand is the pitch" → 4 s free explore, auto-advances
+3. "Open your left palm" → swell openness > 0.75 → "Your palm swells\nthe strings"
 4. "Make a fist" → openness < 0.25 → "A fist hushes them"
-5. "Pinch thumb and finger" → loop captured → "You captured a loop" (pinching with <2 recent notes shows "Play a few notes first, then pinch" and stays on this step; if a loop was already captured earlier, the step auto-completes)
-6. → the songbook: "Choose a song" (see Song mode below — free play is one
-   orb among the songs, not the default landing)
+5. → the songbook, FIRST VISIT: the Twinkle Twinkle orb gently pulses gold
+   and the prompt says "Pinch the golden orb" — the first thing a new user
+   does is play a song.
 
-Step-1 and confirmations show ~2 s. **Skip:** pinch-and-HOLD for 1.5 s at any
-point during onboarding jumps straight to free play (deliberately
-undocumented in the UI — it's an escape hatch, not a feature).
+Step-1 and confirmations show ~2 s. **Skip:** pinch-and-HOLD for 1.5 s at
+any point during onboarding jumps to the songbook (first visit) — skipping
+the tutorial still lands on the purpose, never on empty free play.
+
+**Prompt text system:** `visuals.setPromptText` supports "\n" two-line
+rendering (lines centered at y=44/88, slightly smaller base font) and
+auto-shrinks the font until the longest line fits ~470 px, so long guide
+text never clips. All prompts/confirms were audited for fit after this
+change; the long ones are split across two lines (see steps above,
+"Pinch: replay\nHold pinch: next song", and the free-play intro).
+
+## First five minutes (playtest 4: the purpose never surfaced)
+
+Playtest 4's verdict: "does it look like it got any purpose else than making
+sound when you move your hand?" The honest answer was no — the song-mode
+purpose layer existed but never surfaced: the user went from onboarding
+("You captured a loop") into free play (almost certainly an accidental
+pinch-hold skip past the songbook) and spent the session waving. This was a
+FLOW problem, not a feature gap. The redesign: **the first thing a new user
+does must be playing a song.**
+
+- Onboarding ends AT the songbook (loop steps removed entirely).
+- Pinch-hold in song select does NOT skip to free play — it flashes
+  "Release on a song to choose". Free play is reachable ONLY via its orb.
+- New exit: pinch-hold mid-song quits back to the songbook (there was no
+  way out of a song before). Pinch-hold in free play also returns to the
+  songbook (this is what the free-play intro teaches).
+- The loop gets a one-time, in-context intro on entering free play:
+  "Pinch to capture a loop\nHold pinch: songbook" (5 s, once per session).
+- In song mode, the loop toggle is deferred to pinch RELEASE: a quick pinch
+  captures/clears, a hold quits — acting at engage would do both.
+
+**Pinch-hold (1.5 s) map:** onboarding → songbook (first visit) · song
+select → hint only · song play → songbook (quit) · free play → songbook ·
+song complete → next song. Tap (quick pinch-release): select orb / replay
+song / loop capture-clear.
 
 ## Song mode — the purpose layer (playtest 3: "what's the real purpose?")
 
@@ -108,11 +145,15 @@ free-play voicings):
 y≈0.10, z≈−1.15 (x spread ±0.55), each with a floating title label. The user
 reaches toward an orb — nearest within 0.6 m of the right hand is "aimed"
 (scales ×1.45, brightens) — and pinches to choose. Selection fires on pinch
-**RELEASE**, not engage: in select/complete screens a 1.5 s hold means
-something else, and release disambiguates tap from hold (a hold already
-changed the mode by release time, so it can't double-fire). Pinch-hold in
-select = free play. The melody voice stays live while choosing — noodling
-over the songbook is allowed.
+**RELEASE**, not engage: in select/song/complete a 1.5 s hold means
+something else, and release disambiguates tap from hold
+(`pinchHoldConsumed` guards the release after any hold, so it can never
+double-fire). **Pinch-hold in select does nothing except flash "Release on
+a song to choose"** — free play is orb-only; there is no silent skip out of
+the purpose. On the first visit (straight out of onboarding) the Twinkle
+Twinkle orb pulses gold on its own and the prompt reads "Pinch the golden
+orb". The melody voice stays live while choosing — noodling over the
+songbook is allowed.
 
 **Song play:** HUD top-center shows "Title — n/total". The target note's
 ladder rung pulses **gold**, stronger than the normal active-rung pulse
@@ -132,10 +173,25 @@ returns to the songbook hub.
 
 ## Playtest-3 fixes (same build)
 
-- **The "∞" glyph** (~46–50 s in the test video): identified as overlapping
-  **ripple rings**. Every quantized note change fired a full burst + ripple,
-  so a fast sweep cycled the 10-ring pool rapidly at the hand position — two
-  offset expanding annuli read as a stray "∞". Fixed by the throttle below.
+- **The "∞" glyph — CORRECTED identification (playtest 4):** the earlier
+  "overlapping ripple rings" diagnosis was wrong; the glyph appeared again
+  in the playtest-4 video (~39 s) as a small dark circle with a white ∞
+  floating near the right hand. A full code audit proves it is NOT app UI:
+  no sprite, canvas texture, or material in the codebase draws a dark
+  filled badge — every app visual is additive/transparent. It is the
+  **Horizon OS system-reserved palm-pinch indicator**: per Meta's WebXR
+  Hands docs, Quest reserves palm-pinch on both hands in WebXR — look at
+  your palm at eye level and hold thumb+index until the icon (menu icon on
+  the left hand, the **Meta ∞ logo** on the right) fills up, then release to
+  exit the session. The compositor captures it in recordings. We cannot
+  remove, relabel, or restyle it. **Design implication:** our core pinch
+  gesture overlaps the OS-reserved exit gesture. Quick pinches are safe;
+  the risk zone is a 1.5 s hold combined with palm-at-eye-level + gaze at
+  the hand — exactly what song-select aiming invites. Mitigations in
+  place: holds act at 1.5 s and immediately change mode (the user is out
+  before a longer fill completes); the songbook prompt says "Pinch the
+  golden orb" (look at the orb, not the hand). If playtests show accidental
+  session exits, shorten holds or move hold-actions to the left hand.
 - **Particle-spray throttle:** note-change FX (bursts, ripples, cursor
   flash) now fire only when the previous quantized note was actually held
   ≥ 120 ms. The ladder still tracks every change — immediate instrument

@@ -67,6 +67,7 @@ export class Visuals {
     this.buildHud();
     this.songTarget = -1; // ladder rung the song driver wants (gold pulse)
     this.aimedOrb = -1;
+    this.pulseOrb = -1; // song-select orb to gently pulse (first-visit guide)
   }
 
   // ---- ambient dust -------------------------------------------------
@@ -393,13 +394,26 @@ export class Visuals {
   showPrompt() { this.promptTarget = 1; }
 
   setPromptText(t) {
+    // Two-line support + auto-shrink: "\n" splits into two centered lines
+    // (y=44 / y=88, slightly smaller base font); the font then shrinks
+    // until the longest line fits ~470px so guide text never clips.
     const x = this.promptCanvas.getContext('2d');
     x.clearRect(0, 0, 512, 128);
-    x.font = '44px system-ui, sans-serif';
     x.textAlign = 'center';
     x.textBaseline = 'middle';
     x.fillStyle = 'rgba(232,236,255,0.92)';
-    x.fillText(t, 256, 64);
+    const lines = t.split('\n').slice(0, 2);
+    let size = lines.length > 1 ? 38 : 44;
+    const setF = s => { x.font = `${s}px system-ui, sans-serif`; };
+    setF(size);
+    let widest = Math.max(...lines.map(l => x.measureText(l).width));
+    while (widest > 470 && size > 20) {
+      size -= 2;
+      setF(size);
+      widest = Math.max(...lines.map(l => x.measureText(l).width));
+    }
+    if (lines.length === 1) x.fillText(lines[0], 256, 64);
+    else { x.fillText(lines[0], 256, 44); x.fillText(lines[1], 256, 88); }
     this.promptTex.needsUpdate = true;
   }
 
@@ -604,9 +618,13 @@ export class Visuals {
   }
 
   showSongSelect() { this.songSelect.visible = true; }
-  hideSongSelect() { this.songSelect.visible = false; this.setOrbAim(-1); }
+  hideSongSelect() { this.songSelect.visible = false; this.setOrbAim(-1); this.pulseOrb = -1; }
 
   setOrbAim(i) { this.aimedOrb = i; }
+
+  // First-visit guide: gently pulse one orb (the Twinkle Twinkle orb) so
+  // the onboarding's "Pinch the golden orb" has a visual anchor.
+  setOrbPulse(i) { this.pulseOrb = i; }
 
   // ---- song HUD: small floating progress text, top-center ---------------
   buildHud() {
@@ -663,14 +681,17 @@ export class Visuals {
       m.color.set(0xffd76a);
       m.opacity = 0.78 + 0.22 * Math.sin(this.time * 9);
     }
-    // Song-select orbs breathe gently; the aimed orb glows bigger.
+    // Song-select orbs breathe gently; the aimed orb glows bigger; the
+    // first-visit guide orb (Twinkle) pulses on its own so new users know
+    // where to pinch.
     if (this.songSelect.visible) {
       for (const o of this.songOrbs) {
         const bump = 1 + 0.08 * Math.sin(this.time * 2.4 + o.phase);
         const aim = (o.idx === this.aimedOrb) ? 1.45 : 1.0;
-        const s = o.base * bump * aim;
+        const guide = (o.idx === this.pulseOrb) ? 1 + 0.22 * Math.sin(this.time * 5) : 1.0;
+        const s = o.base * bump * aim * guide;
         o.sprite.scale.set(s, s, 1);
-        o.sprite.material.opacity = (o.idx === this.aimedOrb) ? 1.0 : 0.85;
+        o.sprite.material.opacity = (o.idx === this.aimedOrb || o.idx === this.pulseOrb) ? 1.0 : 0.85;
       }
     }
     // Pitch-cursor flash decay.

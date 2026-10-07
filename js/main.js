@@ -102,11 +102,22 @@ const tmpV = new THREE.Vector3();
 // ---- song mode state ---------------------------------------------------
 // onboarding -> select -> song -> complete -> (select | song | free).
 // Free play is the original conduct-anything mode; songs are the goal.
+// The songbook is the hub: every path out of a session lands here.
 let mode = 'onboarding';
 let songState = null;       // {songIdx, noteIdx, targetSince} while playing
 let curSongIdx = -1;
 let aimedOrb = -1;          // song-select orb under the right hand
 let lastNoteChangeT = -1e9; // FX throttle clock (audio time)
+let selectPromptText = 'Choose a song'; // current songbook prompt (restored after hints)
+let selectHintUntil = 0;    // nowS deadline for the pinch-hold hint flash
+let freeIntroShown = false; // one-time loop intro per session
+let freeIntroUntil = 0;     // nowS deadline for the free-play intro
+// Pinch disambiguation: a 1.5s hold means something different from a tap
+// in select/song/complete, so the release must know which one happened.
+let pinchHoldConsumed = false;
+let pendingSongPinch = false; // quick-pinch loop toggle, deferred to release
+const pendingPinchPos = new THREE.Vector3();
+let pendingPinchValid = false;
 const GOLD = new THREE.Color(0xffd76a);
 const PILLAR_COLS = [0x7fb2ff, 0x9fe8d0, 0xffd27f, 0xb79fff];
 
@@ -114,16 +125,17 @@ const PILLAR_COLS = [0x7fb2ff, 0x9fe8d0, 0xffd27f, 0xb79fff];
 // One large floating instruction at a time (reuses the prompt sprite at
 // 1.6x). Starts on the first frame with a tracked hand — never at an
 // empty room. The first two steps teach the continuous-pitch feel:
-// move and HEAR the mapping, then explore tiny movements. Skip:
-// pinch-and-HOLD 1.5s at any point -> free play.
+// move and HEAR the mapping, then explore tiny movements. The loop is
+// NOT taught here: onboarding ends at the songbook (the purpose), and
+// the loop gets a one-time intro inside free play instead. Skip:
+// pinch-and-HOLD 1.5s -> straight to the songbook.
 let ob = null;    // {step, phase, until, count, noteUntil}
 let obDone = false;
 const OB_STEPS = [
   { instr: 'Move your hand slowly up and down', conf: 'You are the pitch' },
-  { instr: 'Tiny movements — your hand is the pitch', conf: null }, // 4s free explore, auto-advance
-  { instr: 'Open your left palm', conf: 'Your palm swells the strings' },
+  { instr: 'Tiny movements:\nyour hand is the pitch', conf: null }, // 4s free explore, auto-advance
+  { instr: 'Open your left palm', conf: 'Your palm swells\nthe strings' },
   { instr: 'Make a fist', conf: 'A fist hushes them' },
-  { instr: 'Pinch thumb and finger', conf: 'You captured a loop' },
 ];
 
 function obStart() {
@@ -142,23 +154,22 @@ function obAdvance(nowS) {
 function obNext(nowS) {
   ob.step++;
   if (ob.step >= OB_STEPS.length) {
-    // Onboarding complete: into the songbook, not empty free play.
+    // Onboarding complete: into the songbook (first visit — the Twinkle
+    // orb pulses and the prompt says what to do), never empty free play.
     ob = null;
     obDone = true;
-    enterSelect();
+    enterSelect(true);
   } else {
     ob.phase = 'instr';
     visuals.setPromptText(OB_STEPS[ob.step].instr);
     if (ob.step === 1) ob.until = nowS + 4.0; // timed free explore
-    // Already looping from an early pinch -> treat the pinch step as done.
-    if (ob.step === 4 && audio.looping) obAdvance(nowS);
   }
 }
 
 function obSkip() {
   ob = null;
   obDone = true;
-  enterFree(); // the skip gesture means "I know this, just let me play"
+  enterSelect(true); // skipping the tutorial still lands in the songbook
 }
 
 function obTick(nowS) {
@@ -174,29 +185,58 @@ function obTick(nowS) {
 
 // ---- song mode flow ----------------------------------------------------
 // After onboarding, the app asks "Choose a song" instead of dropping the
-// user into empty free play — the songbook is the purpose.
-function enterSelect() {
+// user into empty free play — the songbook is the purpose. First visit
+// (straight out of onboarding): the Twinkle Twinkle orb pulses and the
+// prompt tells the hand exactly what to do.
+function enterSelect(first = false) {
   mode = 'select';
   songState = null;
   aimedOrb = -1;
+  pendingSongPinch = false;
+  pinchHoldConsumed = false;
+  selectHintUntil = 0;
+  freeIntroUntil = 0;
   visuals.setSongTarget(-1);
   visuals.hideHud();
+  visuals.hidePrompt();
   visuals.showSongSelect();
+  visuals.setOrbPulse(first ? 0 : -1);
+  selectPromptText = first ? 'Pinch the golden orb' : 'Choose a song';
   visuals.setPromptBig();
   visuals.setPromptPos(0, 0.48, -1.4);
   visuals.showPrompt();
-  visuals.setPromptText('Choose a song');
+  visuals.setPromptText(selectPromptText);
 }
 
-function enterFree() {
+// Pinch-hold in the songbook is NOT a skip: it flashes a hint. Free play
+// is reachable ONLY through its orb — no silent exits from the purpose.
+function flashSelectHint(nowS) {
+  visuals.setPromptText('Release on a song to choose');
+  selectHintUntil = nowS + 1.6;
+}
+
+function enterFree(nowS) {
   mode = 'free';
   songState = null;
   aimedOrb = -1;
+  pendingSongPinch = false;
+  pinchHoldConsumed = false;
+  selectHintUntil = 0;
   visuals.hideSongSelect();
   visuals.hideHud();
   visuals.setSongTarget(-1);
   visuals.setPromptPos(0, 0.18, -1.4);
-  visuals.hidePrompt();
+  // One-time loop intro, in context: the loop was deliberately NOT taught
+  // during onboarding, so free play teaches it here, once per session.
+  if (!freeIntroShown) {
+    freeIntroShown = true;
+    visuals.setPromptBig();
+    visuals.showPrompt();
+    visuals.setPromptText('Pinch to capture a loop\nHold pinch: songbook');
+    freeIntroUntil = nowS + 5.0;
+  } else {
+    visuals.hidePrompt();
+  }
 }
 
 function startSong(i) {
@@ -205,6 +245,10 @@ function startSong(i) {
   mode = 'song';
   songState = { songIdx: i, noteIdx: 0, targetSince: 0 };
   aimedOrb = -1;
+  pendingSongPinch = false;
+  pinchHoldConsumed = false;
+  selectHintUntil = 0;
+  freeIntroUntil = 0;
   visuals.hideSongSelect();
   visuals.hidePrompt();
   visuals.setSongTarget(S.notes[0].z);
@@ -232,6 +276,8 @@ function advanceSong() {
 function completeSong() {
   mode = 'complete';
   songState = null;
+  pendingSongPinch = false;
+  pinchHoldConsumed = false;
   visuals.setSongTarget(-1);
   visuals.hideHud();
   visuals.setPromptBig();
@@ -249,7 +295,7 @@ function completeSong() {
     }, v * 380);
   }
   setTimeout(() => {
-    if (mode === 'complete') visuals.setPromptText('Pinch: replay • Hold pinch: next song');
+    if (mode === 'complete') visuals.setPromptText('Pinch: replay\nHold pinch: next song');
   }, 2600);
 }
 
@@ -333,6 +379,11 @@ async function enter() {
     // onboarding if it never completed).
     songState = null;
     aimedOrb = -1;
+    pendingSongPinch = false;
+    pinchHoldConsumed = false;
+    selectHintUntil = 0;
+    freeIntroUntil = 0;
+    freeIntroShown = false; // the loop intro shows again next session
     visuals.hideSongSelect();
     visuals.hideHud();
     visuals.setSongTarget(-1);
@@ -425,48 +476,75 @@ function handleRight(tr, ev, nowS) {
     }
   }
 
-  // Pinch-and-hold 1.5s: onboarding skip | select->free | complete->next.
+  // Pinch-and-hold 1.5s map (unambiguous only):
+  //   onboarding -> skip to the songbook (first visit)
+  //   select     -> hint only (free play is orb-only; no silent skip)
+  //   song       -> quit mid-song back to the songbook (there was no exit)
+  //   free       -> back to the songbook (matches the free-play intro)
+  //   complete   -> next song (existing)
   if (ev.pinchHeld) {
+    pinchHoldConsumed = true; // the release after a hold must not also tap
+    pendingSongPinch = false; // a hold is not a tap: discard the deferred toggle
     if (ob) obSkip();
-    else if (mode === 'select') enterFree();
+    else if (mode === 'select') flashSelectHint(nowS);
     else if (mode === 'complete') nextSong();
+    else if (mode === 'song' || mode === 'free') enterSelect();
   }
 
   if (ev.pinched) {
-    if (tr.pinchPosValid) visuals.pinchFlash(tr.pinchPos);
-    // In select/complete the tap action fires on RELEASE (below), so an
-    // engage here must not act — otherwise a hold would double-fire.
-    if (mode === 'select' || mode === 'complete') { /* release handles it */ }
-    else if (audio.looping) {
-      audio.stopLoop();
-      visuals.setLoop(false);
-      visuals.showLoopLabel('loop cleared', 1.8);
+    // In song mode the loop toggle is DEFERRED to release: a quick pinch
+    // captures/clears, a hold quits to the songbook — acting at engage
+    // would do both. Everywhere else the engage acts immediately.
+    if (mode === 'song') {
+      pendingSongPinch = true;
+      pendingPinchValid = tr.pinchPosValid;
+      if (tr.pinchPosValid) pendingPinchPos.copy(tr.pinchPos);
     } else {
-      const now = audio.ctx.currentTime;
-      const recent = noteHistory.filter(n => now - n.t < 8).slice(-24);
-      if (recent.length >= 2) {
-        const t0 = recent[0].t;
-        audio.startLoop(recent.map(n => ({ midi: n.midi, dt: n.t - t0 })));
-        visuals.setLoop(true);
-        visuals.showLoopLabel('looping', 3);
-        if (ob && ob.phase === 'instr' && ob.step === 4) obAdvance(nowS);
-      } else if (ob && ob.phase === 'instr' && ob.step === 4) {
-        ob.noteUntil = nowS + 2.5;
-        visuals.setPromptText('Play a few notes first, then pinch');
-      }
+      if (tr.pinchPosValid) visuals.pinchFlash(tr.pinchPos);
+      // In select/complete the tap action fires on RELEASE (below), so an
+      // engage here must not act — otherwise a hold would double-fire.
+      if (mode === 'select' || mode === 'complete') { /* release handles it */ }
+      else doLoopToggle();
     }
   }
 
-  // Tap actions in select/complete fire on pinch RELEASE: a 1.5s hold means
-  // something else there, and release disambiguates tap from hold. (A hold
-  // already changed the mode by release time, so it can't double-fire.)
+  // Tap actions fire on pinch RELEASE: a 1.5s hold means something else in
+  // select/song/complete, and release disambiguates tap from hold. A hold
+  // sets pinchHoldConsumed, so the release after it can never double-fire.
   if (ev.pinchReleased) {
-    if (mode === 'select' && aimedOrb >= 0) {
-      if (aimedOrb >= SONGS.length) enterFree(); // the "Free play" orb
+    if (pinchHoldConsumed) {
+      pinchHoldConsumed = false;
+    } else if (mode === 'select' && aimedOrb >= 0) {
+      if (aimedOrb >= SONGS.length) enterFree(nowS); // the "Free play" orb
       else startSong(aimedOrb);
     } else if (mode === 'complete') {
       startSong(curSongIdx); // replay
+    } else if (mode === 'song' && pendingSongPinch) {
+      pendingSongPinch = false;
+      if (pendingPinchValid) visuals.pinchFlash(pendingPinchPos);
+      doLoopToggle();
     }
+  }
+}
+
+// Loop capture/clear, shared by free play and song mode (quick pinch).
+// Captures the last 8s of quantized note events as a looping arpeggio
+// with the orbiting gold torus; a second pinch clears it.
+function doLoopToggle() {
+  if (audio.looping) {
+    audio.stopLoop();
+    visuals.setLoop(false);
+    visuals.showLoopLabel('loop cleared', 1.8);
+  } else {
+    const now = audio.ctx.currentTime;
+    const recent = noteHistory.filter(n => now - n.t < 8).slice(-24);
+    if (recent.length >= 2) {
+      const t0 = recent[0].t;
+      audio.startLoop(recent.map(n => ({ midi: n.midi, dt: n.t - t0 })));
+      visuals.setLoop(true);
+      visuals.showLoopLabel('looping', 3);
+    }
+    // Fewer than 2 recent notes: silent no-op (nothing to loop yet).
   }
 }
 
@@ -536,6 +614,16 @@ function tick(time, frame) {
     // Onboarding starts on the first frame with a tracked hand.
     if (!ob && !obDone && handsEverSeen) obStart();
     if (ob) obTick(nowS);
+    // Songbook pinch-hold hint: flash, then restore the mode's prompt.
+    if (mode === 'select' && selectHintUntil && nowS >= selectHintUntil) {
+      selectHintUntil = 0;
+      visuals.setPromptText(selectPromptText);
+    }
+    // Free-play loop intro: show once, then get out of the way.
+    if (mode === 'free' && freeIntroUntil && nowS >= freeIntroUntil) {
+      freeIntroUntil = 0;
+      visuals.hidePrompt();
+    }
     if (!htNagShown && !handsEverSeen && nowS - sessionT0 > 8) {
       htNagShown = true;
       visuals.setPromptText('enable hand tracking');
