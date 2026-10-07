@@ -39,6 +39,69 @@ let htNagShown = false;
 let handsEverSeen = false;
 const tmpColor = new THREE.Color();
 
+// ---- guided onboarding (~60s, auto-advancing) -------------------------
+// One large floating instruction at a time (reuses the prompt sprite at
+// 1.6x). Starts on the first frame with a tracked hand — never at an
+// empty room. Each step advances on its gesture, flashes a confirmation,
+// then moves on. Skip: pinch-and-HOLD 1.5s at any point -> free play.
+let ob = null;    // {step, phase, until, down, lastZone, noteUntil}
+let obDone = false;
+const OB_STEPS = [
+  { instr: 'Raise your right hand', conf: 'Higher hand, higher note' },
+  { instr: 'Now lower it slowly', conf: 'Lower hand, lower note' },
+  { instr: 'Open your left palm', conf: 'Your palm swells the strings' },
+  { instr: 'Make a fist', conf: 'A fist hushes them' },
+  { instr: 'Pinch thumb and finger', conf: 'You captured a loop' },
+];
+
+function obStart() {
+  ob = { step: 0, phase: 'instr', until: 0, down: 0, lastZone: -1, noteUntil: 0 };
+  visuals.setPromptBig();
+  visuals.showPrompt();
+  visuals.setPromptText(OB_STEPS[0].instr);
+}
+
+function obAdvance(nowS) {
+  ob.phase = 'confirm';
+  ob.until = nowS + 2.0;
+  visuals.setPromptText(OB_STEPS[ob.step].conf);
+}
+
+function obNext(nowS) {
+  ob.step++;
+  if (ob.step >= OB_STEPS.length) {
+    ob.phase = 'conduct';
+    ob.until = nowS + 3.0;
+    visuals.setPromptText('Conduct.');
+  } else {
+    ob.phase = 'instr';
+    visuals.setPromptText(OB_STEPS[ob.step].instr);
+    if (ob.step === 1) { ob.down = 0; ob.lastZone = -1; }
+    // Already looping from an early pinch -> treat the pinch step as done.
+    if (ob.step === 4 && audio.looping) obAdvance(nowS);
+  }
+}
+
+function obSkip() {
+  ob = null;
+  obDone = true;
+  visuals.hidePrompt();
+}
+
+function obTick(nowS) {
+  if (!ob) return;
+  if (ob.noteUntil && nowS >= ob.noteUntil) {
+    ob.noteUntil = 0;
+    if (ob.phase === 'instr') visuals.setPromptText(OB_STEPS[ob.step].instr);
+  }
+  if (ob.phase === 'confirm' && nowS >= ob.until) obNext(nowS);
+  else if (ob.phase === 'conduct' && nowS >= ob.until) {
+    ob = null;
+    obDone = true;
+    visuals.hidePrompt();
+  }
+}
+
 function setStatus(t) { statusEl.textContent = t; }
 
 init();
@@ -99,6 +162,8 @@ async function enter() {
   session.addEventListener('end', () => {
     overlay.classList.remove('hidden');
     setStatus('Tap to re-enter');
+    visuals.hideHandViz('left');
+    visuals.hideHandViz('right');
     renderer.setAnimationLoop(null);
   });
   lastT = performance.now();
@@ -118,11 +183,19 @@ function getTracker(h) {
   return trackers.get(h);
 }
 
-function handleRight(tr, ev) {
+function handleRight(tr, ev, nowS) {
   const color = pitchColor(ev.zone, 11, tmpColor);
-  visuals.followLadder(tr.pos.x, tr.pos.z, dtG);
   visuals.setLadderRange(tr.lo, tr.hi);
   visuals.setLadderActive(ev.zone, color);
+
+  // Onboarding: track downward travel for the "lower it slowly" step.
+  if (ob && ob.phase === 'instr' && ob.step === 1) {
+    if (ev.zoneChanged && ob.lastZone >= 0 && ev.zone < ob.lastZone) {
+      ob.down += ob.lastZone - ev.zone;
+      if (ob.down >= 3) obAdvance(nowS);
+    }
+    ob.lastZone = ev.zone;
+  }
 
   if (ev.zoneChanged) {
     const midi = PENT_MIDIS[ev.zone];
@@ -133,14 +206,21 @@ function handleRight(tr, ev) {
     if (noteHistory.length > 40) noteHistory.splice(0, noteHistory.length - 40);
     visuals.spawnBurst(tr.pos, color);
     visuals.spawnRipple(tr.pos, color);
+    visuals.flashPitchCursor();
     melAmp = 1;
-    visuals.hidePrompt();
+    if (ob && ob.phase === 'instr' && ob.step === 0) obAdvance(nowS);
+    else if (!ob) visuals.hidePrompt();
   }
 
+  // Onboarding skip: pinch-and-hold 1.5s jumps straight to free play.
+  if (ob && ev.pinchHeld) obSkip();
+
   if (ev.pinched) {
+    if (tr.pinchPosValid) visuals.pinchFlash(tr.pinchPos);
     if (audio.looping) {
       audio.stopLoop();
       visuals.setLoop(false);
+      visuals.showLoopLabel('loop cleared', 1.8);
     } else {
       const now = audio.ctx.currentTime;
       const recent = noteHistory.filter(n => now - n.t < 8).slice(-24);
@@ -148,12 +228,17 @@ function handleRight(tr, ev) {
         const t0 = recent[0].t;
         audio.startLoop(recent.map(n => ({ midi: n.midi, dt: n.t - t0 })));
         visuals.setLoop(true);
+        visuals.showLoopLabel('looping', 3);
+        if (ob && ob.phase === 'instr' && ob.step === 4) obAdvance(nowS);
+      } else if (ob && ob.phase === 'instr' && ob.step === 4) {
+        ob.noteUntil = nowS + 2.5;
+        visuals.setPromptText('Play a few notes first, then pinch');
       }
     }
   }
 }
 
-function handleLeft(tr, ev) {
+function handleLeft(tr, ev, nowS) {
   // Chord zones: low = I, mid = vi, high = IV/V alternating per fresh entry.
   const z = ev.zone;
   let ci = chordIdx;
@@ -176,6 +261,12 @@ function handleLeft(tr, ev) {
   const k = 1 - Math.exp(-dtG / 0.12);
   swellSm += (ev.openness - swellSm) * k;
   audio.setSwell(swellSm);
+
+  // Onboarding: palm / fist steps key off left-hand openness.
+  if (ob && ob.phase === 'instr') {
+    if (ob.step === 2 && ev.openness > 0.75) obAdvance(nowS);
+    else if (ob.step === 3 && ev.openness < 0.25) obAdvance(nowS);
+  }
 }
 
 function tick(time, frame) {
@@ -187,6 +278,7 @@ function tick(time, frame) {
   const session = renderer.xr.getSession();
   const refSpace = renderer.xr.getReferenceSpace();
   if (frame && session && refSpace) {
+    const seen = { left: false, right: false };
     for (const src of session.inputSources) {
       if (!src.hand) continue;
       const h = src.handedness;
@@ -195,9 +287,17 @@ function tick(time, frame) {
       const ev = tr.update(src, frame, refSpace, nowS, dt);
       if (!ev.tracked) continue;
       handsEverSeen = true;
-      if (h === 'right') handleRight(tr, ev);
-      else handleLeft(tr, ev);
+      seen[h] = true;
+      visuals.setHandViz(h, tr.jointPos, tr.jointCount, tr.pos);
+      if (h === 'right') {
+        visuals.setPitchCursor(tr.pos.y);
+        handleRight(tr, ev, nowS);
+      } else handleLeft(tr, ev, nowS);
     }
+    for (const h of ['left', 'right']) if (!seen[h]) visuals.hideHandViz(h);
+    // Onboarding starts on the first frame with a tracked hand.
+    if (!ob && !obDone && handsEverSeen) obStart();
+    if (ob) obTick(nowS);
     if (!htNagShown && !handsEverSeen && nowS - sessionT0 > 8) {
       htNagShown = true;
       visuals.setPromptText('enable hand tracking');

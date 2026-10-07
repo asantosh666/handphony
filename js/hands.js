@@ -23,6 +23,16 @@ const TIP_NAMES = [
   'pinky-finger-tip',
 ];
 
+// All 25 XRHand joints, for the hand-visualization constellation.
+const JOINT_NAMES = [
+  'wrist',
+  'thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip',
+  'index-finger-metacarpal', 'index-finger-phalanx-proximal', 'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal', 'index-finger-tip',
+  'middle-finger-metacarpal', 'middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal', 'middle-finger-tip',
+  'ring-finger-metacarpal', 'ring-finger-phalanx-proximal', 'ring-finger-phalanx-intermediate', 'ring-finger-phalanx-distal', 'ring-finger-tip',
+  'pinky-finger-metacarpal', 'pinky-finger-phalanx-proximal', 'pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal', 'pinky-finger-tip',
+];
+
 export class HandTracker {
   // zones: number of discrete height zones; lo/hi: initial Y bounds (meters,
   // 'local' reference space, origin ~ headset); loClamp/hiClamp: hard limits.
@@ -46,10 +56,20 @@ export class HandTracker {
     this.oMin = 0.085;
     this.oMax = 0.185;
     this.openness = 0.55;
+    // 80ms zone dwell (anti-waver): candidate zone + entry time.
+    this.pendingZone = -1;
+    this.pendingT = 0;
+    // Pinch-hold edge (onboarding skip) + pinch point for flash feedback.
+    this.pinchHeld = false;
+    this.pinchPos = new THREE.Vector3();
+    this.pinchPosValid = false;
+    // Joint constellation for hand visualization (25 XRHand joints).
+    this.jointPos = new Float32Array(25 * 3);
+    this.jointCount = 0;
   }
 
   update(src, frame, refSpace, now, dt) {
-    const ev = { zoneChanged: false, zone: -1, pinched: false, openness: this.openness, tracked: false };
+    const ev = { zoneChanged: false, zone: -1, pinched: false, pinchHeld: false, openness: this.openness, tracked: false };
     if (!src.hand) return ev;
 
     const wrist = jointPos(src.hand, frame, refSpace, 'wrist', this._a);
@@ -65,18 +85,46 @@ export class HandTracker {
     if (y < this.lo) this.lo = Math.max(y, this.loClamp);
     if (y > this.hi) this.hi = Math.min(y, this.hiClamp);
 
-    // Zone with 3cm hysteresis on the boundary.
+    // Joint constellation for the hand-visualization points (compact prefix).
+    let jc = 0;
+    for (let i = 0; i < JOINT_NAMES.length; i++) {
+      const j = src.hand.get(JOINT_NAMES[i]);
+      const p = j ? frame.getJointPose(j, refSpace) : null;
+      if (p) {
+        const v = p.transform.position;
+        this.jointPos[jc * 3] = v.x;
+        this.jointPos[jc * 3 + 1] = v.y;
+        this.jointPos[jc * 3 + 2] = v.z;
+        jc++;
+      }
+    }
+    this.jointCount = jc;
+
+    // Zone with 3cm hysteresis on the boundary + 80ms dwell: a new zone
+    // only commits once the hand has stayed past the boundary for 80ms,
+    // which kills machine-gun notes from hand waver.
     const span = this.hi - this.lo;
     let raw = Math.floor(((y - this.lo) / span) * this.zones);
     raw = Math.max(0, Math.min(this.zones - 1, raw));
     if (this.zone < 0) {
       this.zone = raw;
+      this.pendingZone = -1;
     } else if (raw !== this.zone) {
       const boundary = this.lo + (Math.max(raw, this.zone) * span) / this.zones;
       if (Math.abs(y - boundary) >= 0.03) {
-        this.zone = raw;
-        ev.zoneChanged = true;
+        if (this.pendingZone !== raw) {
+          this.pendingZone = raw;
+          this.pendingT = now;
+        } else if (now - this.pendingT >= 0.08) {
+          this.zone = raw;
+          this.pendingZone = -1;
+          ev.zoneChanged = true;
+        }
+      } else {
+        this.pendingZone = -1;
       }
+    } else {
+      this.pendingZone = -1;
     }
     ev.zone = this.zone;
 
@@ -84,6 +132,8 @@ export class HandTracker {
     const th = jointPos(src.hand, frame, refSpace, 'thumb-tip', this._b);
     const ix = jointPos(src.hand, frame, refSpace, 'index-finger-tip', this._c);
     if (th && ix) {
+      this.pinchPos.copy(th).add(ix).multiplyScalar(0.5);
+      this.pinchPosValid = true;
       const d = th.distanceTo(ix);
       if (this.pinch === 'open' && d < 0.025) {
         this.pinch = 'engaged';
@@ -97,7 +147,13 @@ export class HandTracker {
           this.fired = true;
         }
       }
+    } else {
+      this.pinchPosValid = false;
     }
+    // Pinch-hold edge: engaged continuously for 1.5s (onboarding skip).
+    const heldNow = this.pinch === 'engaged' && (now - this.engageT) > 1.5;
+    ev.pinchHeld = heldNow && !this.pinchHeld;
+    this.pinchHeld = heldNow;
 
     // Palm openness: mean fingertip-to-wrist distance, calibrated expand-only.
     let sum = 0, n = 0;

@@ -5,6 +5,7 @@
 // Nothing dissonant is reachable by design.
 
 export const PENT_MIDIS = [60, 62, 64, 67, 69, 72, 74, 76, 79, 81, 84]; // C4..C6
+export const NOTE_NAMES = ['C4', 'D4', 'E4', 'G4', 'A4', 'C5', 'D5', 'E5', 'G5', 'A5', 'C6'];
 
 export class AudioEngine {
   constructor() {

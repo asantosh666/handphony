@@ -3,12 +3,27 @@
 // MeshBasicMaterial; depth comes from fog + additive layering.
 
 import * as THREE from 'three';
+import { NOTE_NAMES } from './audio.js';
 
 function canvasTexture(w, h, draw) {
   const cv = document.createElement('canvas');
   cv.width = w; cv.height = h;
   draw(cv.getContext('2d'), w, h);
   return new THREE.CanvasTexture(cv);
+}
+
+// Soft round dot: white core fading to transparent edge. Shared by the
+// note bursts, hand-joint points, palm orbs and pinch flashes so nothing
+// ever renders as a hard square.
+function makeDotTexture() {
+  return canvasTexture(64, 64, (x, w, h) => {
+    const g = x.createRadialGradient(w / 2, h / 2, 1, w / 2, h / 2, w / 2);
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.35, 'rgba(255,255,255,0.85)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    x.fillStyle = g;
+    x.fillRect(0, 0, w, h);
+  });
 }
 
 // Pitch -> color: deep blue (low) to gold (high).
@@ -30,6 +45,10 @@ export class Visuals {
     this.loopOn = false;
     this.loopAng = 0;
     this._c = new THREE.Color();
+    this._v = new THREE.Vector3();
+    this.dotTex = makeDotTexture();
+    this.ladderLo = -0.45;
+    this.ladderHi = 0.55;
 
     this.buildDust();
     this.buildStage();
@@ -39,6 +58,10 @@ export class Visuals {
     this.buildLadder();
     this.buildLoopRing();
     this.buildPrompt();
+    this.buildHandViz();
+    this.buildPitchCursor();
+    this.buildPinchFlashes();
+    this.buildLoopLabel();
   }
 
   // ---- ambient dust -------------------------------------------------
@@ -146,7 +169,8 @@ export class Visuals {
     g.setAttribute('position', new THREE.BufferAttribute(this.bPos, 3));
     g.setAttribute('color', new THREE.BufferAttribute(this.bCol, 3));
     const m = new THREE.PointsMaterial({
-      size: 0.035, vertexColors: true, transparent: true, opacity: 0.95,
+      size: 0.035, vertexColors: true, map: this.dotTex, alphaTest: 0.01,
+      transparent: true, opacity: 0.95,
       blending: THREE.AdditiveBlending, depthWrite: false,
     });
     this.burstPts = new THREE.Points(g, m);
@@ -223,11 +247,13 @@ export class Visuals {
     }
   }
 
-  // ---- pitch ladder: faint beam + 11 rungs beside the right hand -----
+  // ---- pitch ladder: fixed in view, beam + 11 rungs + note name ------
   buildLadder() {
     this.ladder = new THREE.Group();
+    // Fixed position: comfortably in view, no hand-following.
+    this.ladder.position.set(0.45, 0, -1.5);
     const beamMat = new THREE.MeshBasicMaterial({
-      color: 0x8fa8ff, transparent: true, opacity: 0.28,
+      color: 0x8fa8ff, transparent: true, opacity: 0.45,
       blending: THREE.AdditiveBlending, depthWrite: false,
     });
     this.beam = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 1, 8), beamMat);
@@ -238,24 +264,41 @@ export class Visuals {
         color: 0xffffff, transparent: true, opacity: 0.22,
         blending: THREE.AdditiveBlending, depthWrite: false,
       });
-      const r = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.014, 0.03), mat);
+      const r = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.02, 0.035), mat);
       this.ladder.add(r);
       this.rungs.push(r);
     }
+    // Note-name sprite floating above the active rung (e.g. "E5").
+    this.noteCanvas = document.createElement('canvas');
+    this.noteCanvas.width = 256; this.noteCanvas.height = 128;
+    this.noteTex = new THREE.CanvasTexture(this.noteCanvas);
+    this.noteMat = new THREE.SpriteMaterial({ map: this.noteTex, transparent: true, depthWrite: false });
+    this.noteSprite = new THREE.Sprite(this.noteMat);
+    this.noteSprite.scale.set(0.20, 0.10, 1);
+    this.noteSprite.visible = false;
+    this.ladder.add(this.noteSprite);
     this.scene.add(this.ladder);
     this.ladderActive = -1;
   }
 
   setLadderRange(lo, hi) {
+    this.ladderLo = lo;
+    this.ladderHi = hi;
     this.beam.scale.y = Math.max(0.05, hi - lo);
     this.beam.position.y = (lo + hi) / 2;
     for (let i = 0; i < 11; i++) this.rungs[i].position.y = lo + ((i + 0.5) * (hi - lo)) / 11;
   }
 
-  followLadder(x, z, dt) {
-    const k = 1 - Math.exp(-dt / 0.15);
-    this.ladder.position.x += (x + 0.24 - this.ladder.position.x) * k;
-    this.ladder.position.z += (z - this.ladder.position.z) * k;
+  setNoteName(zone) {
+    const x = this.noteCanvas.getContext('2d');
+    x.clearRect(0, 0, 256, 128);
+    x.font = '600 64px system-ui, sans-serif';
+    x.textAlign = 'center';
+    x.textBaseline = 'middle';
+    x.fillStyle = 'rgba(255,244,220,0.95)';
+    x.fillText(NOTE_NAMES[zone], 128, 66);
+    this.noteTex.needsUpdate = true;
+    this.noteSprite.position.set(0, this.rungs[zone].position.y + 0.085, 0);
   }
 
   setLadderActive(zone, color) {
@@ -273,8 +316,33 @@ export class Visuals {
       const m = this.rungs[zone].material;
       m.color.copy(color);
       m.opacity = 1;
+      this.setNoteName(zone);
+      this.noteSprite.visible = true;
+    } else {
+      this.noteSprite.visible = false;
     }
   }
+
+  // ---- pitch cursor: bright ring ON the ladder at the right hand's ----
+  // ---- height — connects hand -> ladder -> note. Flashes on note fire.
+  buildPitchCursor() {
+    this.cursor = new THREE.Mesh(
+      new THREE.RingGeometry(0.038, 0.052, 32),
+      new THREE.MeshBasicMaterial({
+        color: 0xfff2cf, transparent: true, opacity: 0.9,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+      })
+    );
+    this.cursorFlash = 0;
+    this.ladder.add(this.cursor);
+  }
+
+  setPitchCursor(y) {
+    const c = Math.max(this.ladderLo, Math.min(this.ladderHi, y));
+    this.cursor.position.set(0, c, 0);
+  }
+
+  flashPitchCursor() { this.cursorFlash = 1; }
 
   // ---- loop ring: luminous torus orbiting the user while looping -----
   buildLoopRing() {
@@ -305,8 +373,13 @@ export class Visuals {
     spr.scale.set(0.95, 0.24, 1);
     spr.position.set(0, 0.18, -1.4);
     this.scene.add(spr);
+    this.promptSprite = spr;
     this.setPromptText('raise your hand');
   }
+
+  setPromptBig() { this.promptSprite.scale.set(0.95 * 1.6, 0.24 * 1.6, 1); }
+
+  showPrompt() { this.promptTarget = 1; }
 
   setPromptText(t) {
     const x = this.promptCanvas.getContext('2d');
@@ -320,6 +393,106 @@ export class Visuals {
   }
 
   hidePrompt() { this.promptTarget = 0; }
+
+  // ---- hand visualization --------------------------------------------
+  // WebXR never renders hands automatically — the app must. Each tracked
+  // hand gets its 25 XRHand joints as glowing points (gold = right/melody,
+  // teal = left/harmony, which also teaches the mapping) plus a soft palm
+  // orb for presence. Hidden when the hand isn't tracked.
+  buildHandViz() {
+    this.handPts = {};
+    this.palmOrbs = {};
+    const cols = { right: 0xffd27f, left: 0x9fe8d0 };
+    for (const h of ['right', 'left']) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(25 * 3), 3));
+      const m = new THREE.PointsMaterial({
+        size: 0.02, map: this.dotTex, alphaTest: 0.01, transparent: true, opacity: 0.95,
+        color: cols[h], blending: THREE.AdditiveBlending, depthWrite: false,
+      });
+      const pts = new THREE.Points(g, m);
+      pts.frustumCulled = false;
+      pts.visible = false;
+      this.scene.add(pts);
+      this.handPts[h] = pts;
+      const orb = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: this.dotTex, color: cols[h], transparent: true, opacity: 0.5,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      }));
+      orb.scale.set(0.06, 0.06, 1);
+      orb.visible = false;
+      this.scene.add(orb);
+      this.palmOrbs[h] = orb;
+    }
+  }
+
+  setHandViz(h, jointArr, count, palmPos) {
+    const pts = this.handPts[h];
+    if (count < 8) { pts.visible = false; this.palmOrbs[h].visible = false; return; }
+    const attr = pts.geometry.attributes.position;
+    attr.array.set(jointArr.subarray(0, count * 3));
+    attr.needsUpdate = true;
+    pts.geometry.setDrawRange(0, count);
+    pts.visible = true;
+    this.palmOrbs[h].position.copy(palmPos);
+    this.palmOrbs[h].visible = true;
+  }
+
+  hideHandViz(h) { this.handPts[h].visible = false; this.palmOrbs[h].visible = false; }
+
+  // ---- pinch flash: bright pulse at the pinch point when a pinch ------
+  // ---- registers, distinct from the loop ring. Pooled x3.
+  buildPinchFlashes() {
+    this.pfPool = [];
+    for (let i = 0; i < 3; i++) {
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: this.dotTex, color: 0xfff6da, transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      }));
+      s.visible = false;
+      s.scale.set(0.1, 0.1, 1);
+      this.scene.add(s);
+      this.pfPool.push({ s, t: 1 });
+    }
+    this.pfCursor = 0;
+  }
+
+  pinchFlash(p) {
+    const f = this.pfPool[this.pfCursor];
+    this.pfCursor = (this.pfCursor + 1) % this.pfPool.length;
+    f.s.position.copy(p);
+    f.t = 0;
+    f.s.visible = true;
+  }
+
+  // ---- loop label: small "looping" / "loop cleared" text near the ring
+  buildLoopLabel() {
+    this.llCanvas = document.createElement('canvas');
+    this.llCanvas.width = 512; this.llCanvas.height = 128;
+    this.llTex = new THREE.CanvasTexture(this.llCanvas);
+    this.llMat = new THREE.SpriteMaterial({ map: this.llTex, transparent: true, depthWrite: false, opacity: 0 });
+    this.llSprite = new THREE.Sprite(this.llMat);
+    this.llSprite.scale.set(0.55, 0.14, 1);
+    this.llSprite.visible = false;
+    this.scene.add(this.llSprite);
+    this.llT = 1e9;
+    this.llDur = 3;
+  }
+
+  showLoopLabel(text, dur = 3) {
+    const x = this.llCanvas.getContext('2d');
+    x.clearRect(0, 0, 512, 128);
+    x.font = '44px system-ui, sans-serif';
+    x.textAlign = 'center';
+    x.textBaseline = 'middle';
+    x.fillStyle = 'rgba(255,226,160,0.95)';
+    x.fillText(text, 256, 64);
+    this.llTex.needsUpdate = true;
+    this.llT = 0;
+    this.llDur = dur;
+    this.llSprite.visible = true;
+    this.llMat.opacity = 1;
+  }
 
   // ---- per-frame ------------------------------------------------------
   update(dt) {
@@ -336,6 +509,34 @@ export class Visuals {
       this.loopAng += dt * 0.7;
       this.loopRing.position.set(Math.cos(this.loopAng) * 2.0, 0.25, Math.sin(this.loopAng) * 2.0);
       this.loopRing.rotation.y += dt * 1.2;
+    }
+    // Active rung pulses (keeps its pitch coloring).
+    if (this.ladderActive >= 0) {
+      this.rungs[this.ladderActive].material.opacity = 0.72 + 0.28 * Math.sin(this.time * 7);
+    }
+    // Pitch-cursor flash decay.
+    this.cursorFlash = Math.max(0, this.cursorFlash - dt * 3);
+    const cs = 1 + this.cursorFlash * 1.6;
+    this.cursor.scale.set(cs, cs, cs);
+    this.cursor.material.opacity = 0.55 + 0.45 * this.cursorFlash;
+    // Pinch flashes.
+    for (const f of this.pfPool) {
+      if (f.t >= 1) { f.s.visible = false; continue; }
+      f.t = Math.min(1, f.t + dt / 0.45);
+      f.s.material.opacity = 1 - f.t;
+      const sc = 0.08 + f.t * 0.14;
+      f.s.scale.set(sc, sc, 1);
+    }
+    // Loop label follows the ring, then fades.
+    if (this.llSprite.visible) {
+      this.llT += dt;
+      this.llSprite.position.copy(this.loopRing.position);
+      this.llSprite.position.y += 0.42;
+      if (this.llT > this.llDur) {
+        const fo = 1 - (this.llT - this.llDur) / 0.6;
+        this.llMat.opacity = Math.max(0, fo);
+        if (fo <= 0) this.llSprite.visible = false;
+      }
     }
     const k = 1 - Math.exp(-dt * 3);
     this.promptOp += (this.promptTarget - this.promptOp) * k;
