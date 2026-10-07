@@ -63,6 +63,10 @@ export class Visuals {
     this.buildPitchCursor();
     this.buildPinchFlashes();
     this.buildLoopLabel();
+    this.buildSongSelect();
+    this.buildHud();
+    this.songTarget = -1; // ladder rung the song driver wants (gold pulse)
+    this.aimedOrb = -1;
   }
 
   // ---- ambient dust -------------------------------------------------
@@ -180,8 +184,8 @@ export class Visuals {
     this.bCursor = 0;
   }
 
-  spawnBurst(p, color) {
-    for (let k = 0; k < 22; k++) {
+  spawnBurst(p, color, count = 22) {
+    for (let k = 0; k < count; k++) {
       const i = this.bCursor;
       this.bCursor = (this.bCursor + 1) % this.bN;
       this.bPos[i * 3] = p.x; this.bPos[i * 3 + 1] = p.y; this.bPos[i * 3 + 2] = p.z;
@@ -382,6 +386,10 @@ export class Visuals {
 
   setPromptBig() { this.promptSprite.scale.set(0.95 * 1.6, 0.24 * 1.6, 1); }
 
+  // The song-select screen lifts the prompt above the orb arc so the big
+  // "Choose a song" text doesn't sit on top of the middle orb.
+  setPromptPos(x, y, z) { this.promptSprite.position.set(x, y, z); }
+
   showPrompt() { this.promptTarget = 1; }
 
   setPromptText(t) {
@@ -545,6 +553,89 @@ export class Visuals {
     this.llMat.opacity = 1;
   }
 
+  // ---- floating text label sprite (song orbs, HUD) --------------------
+  makeLabel(text, wPx, fontPx, scaleW, scaleH, color) {
+    const cv = document.createElement('canvas');
+    cv.width = wPx; cv.height = 128;
+    const tex = new THREE.CanvasTexture(cv);
+    const x = cv.getContext('2d');
+    x.font = `${fontPx}px system-ui, sans-serif`;
+    x.textAlign = 'center';
+    x.textBaseline = 'middle';
+    x.fillStyle = color;
+    x.fillText(text, wPx / 2, 66);
+    tex.needsUpdate = true;
+    const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+    spr.scale.set(scaleW, scaleH, 1);
+    return spr;
+  }
+
+  // ---- song select: 4 song orbs + a free-play orb in a gentle arc -----
+  // The user reaches toward an orb (nearest within 0.6m = aimed) and
+  // pinches on RELEASE to choose — release (not engage) so a 1.5s hold
+  // can mean free-play instead of double-firing a selection.
+  buildSongSelect() {
+    this.songSelect = new THREE.Group();
+    this.songOrbs = [];
+    const defs = [
+      { title: 'Twinkle Twinkle', color: 0xffd27f },
+      { title: 'Mary Had a Little Lamb', color: 0x9fe8d0 },
+      { title: 'Merrily We Roll Along', color: 0x7fb2ff },
+      { title: 'Auld Lang Syne', color: 0xb79fff },
+      { title: 'Free play', color: 0x8a93a8 },
+    ];
+    const xs = [-0.55, -0.275, 0, 0.275, 0.55];
+    defs.forEach((d, i) => {
+      const pos = new THREE.Vector3(xs[i], 0.10, -1.15 + 0.06 * (Math.abs(xs[i]) / 0.55));
+      const spr = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: this.dotTex, color: d.color, transparent: true, opacity: 0.85,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      }));
+      spr.position.copy(pos);
+      spr.scale.set(0.16, 0.16, 1);
+      this.songSelect.add(spr);
+      const label = this.makeLabel(d.title, 640, 40, 0.42, 0.084, 'rgba(232,236,255,0.92)');
+      label.position.set(pos.x, pos.y + 0.17, pos.z);
+      this.songSelect.add(label);
+      this.songOrbs.push({ idx: i, pos, sprite: spr, base: 0.16, phase: i * 1.3 });
+    });
+    this.songSelect.visible = false;
+    this.scene.add(this.songSelect);
+  }
+
+  showSongSelect() { this.songSelect.visible = true; }
+  hideSongSelect() { this.songSelect.visible = false; this.setOrbAim(-1); }
+
+  setOrbAim(i) { this.aimedOrb = i; }
+
+  // ---- song HUD: small floating progress text, top-center ---------------
+  buildHud() {
+    this.hud = this.makeLabel('', 640, 44, 0.5, 0.1, 'rgba(255,244,220,0.95)');
+    this.hud.position.set(0, 0.62, -1.6);
+    this.hud.visible = false;
+    this.scene.add(this.hud);
+  }
+
+  setHudText(t) {
+    const m = this.hud.material, cv = m.map.image;
+    const x = cv.getContext('2d');
+    x.clearRect(0, 0, cv.width, cv.height);
+    x.font = '44px system-ui, sans-serif';
+    x.textAlign = 'center';
+    x.textBaseline = 'middle';
+    x.fillStyle = 'rgba(255,244,220,0.95)';
+    x.fillText(t, cv.width / 2, 66);
+    m.map.needsUpdate = true;
+  }
+
+  showHud() { this.hud.visible = true; }
+  hideHud() { this.hud.visible = false; }
+
+  // ---- song target: the ladder rung the song wants, pulsing gold -------
+  setSongTarget(zone) { this.songTarget = zone; }
+
+  getRungWorldPos(zone, out) { return this.rungs[zone].getWorldPosition(out); }
+
   // ---- per-frame ------------------------------------------------------
   update(dt) {
     this.time += dt;
@@ -564,6 +655,23 @@ export class Visuals {
     // Active rung pulses (keeps its pitch coloring).
     if (this.ladderActive >= 0) {
       this.rungs[this.ladderActive].material.opacity = 0.72 + 0.28 * Math.sin(this.time * 7);
+    }
+    // Song target rung pulses gold, stronger than the normal active pulse.
+    // Applied after, so gold wins when target == the user's active rung.
+    if (this.songTarget >= 0 && this.songTarget < this.rungs.length) {
+      const m = this.rungs[this.songTarget].material;
+      m.color.set(0xffd76a);
+      m.opacity = 0.78 + 0.22 * Math.sin(this.time * 9);
+    }
+    // Song-select orbs breathe gently; the aimed orb glows bigger.
+    if (this.songSelect.visible) {
+      for (const o of this.songOrbs) {
+        const bump = 1 + 0.08 * Math.sin(this.time * 2.4 + o.phase);
+        const aim = (o.idx === this.aimedOrb) ? 1.45 : 1.0;
+        const s = o.base * bump * aim;
+        o.sprite.scale.set(s, s, 1);
+        o.sprite.material.opacity = (o.idx === this.aimedOrb) ? 1.0 : 0.85;
+      }
     }
     // Pitch-cursor flash decay.
     this.cursorFlash = Math.max(0, this.cursorFlash - dt * 3);

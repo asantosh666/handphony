@@ -96,7 +96,7 @@ export class HandTracker {
   }
 
   update(src, frame, refSpace, now, dt) {
-    const ev = { zoneChanged: false, zone: -1, noteChanged: false, noteIdx: -1, pinched: false, pinchHeld: false, openness: this.openness, tracked: false };
+    const ev = { zoneChanged: false, zone: -1, noteChanged: false, noteIdx: -1, pinched: false, pinchHeld: false, pinchReleased: false, openness: this.openness, tracked: false };
     if (!src.hand) return ev;
 
     const wrist = jointPos(src.hand, frame, refSpace, 'wrist', this._a);
@@ -204,7 +204,12 @@ export class HandTracker {
         this.fired = false;
       } else if (this.pinch === 'engaged') {
         if (d > 0.035) {
+          // Release edge: true only if this engagement registered a pinch.
+          // Song select / song-complete use RELEASE for tap actions so a
+          // 1.5s hold can mean something else without double-firing.
+          ev.pinchReleased = this.fired;
           this.pinch = 'open';
+          this.fired = false;
         } else if (!this.fired && now - this.engageT > 0.09) {
           if (now - this.lastFire > 0.15) { ev.pinched = true; this.lastFire = now; }
           this.fired = true;

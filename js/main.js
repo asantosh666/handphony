@@ -23,6 +23,57 @@ const CHORDS = [
   { name: 'G',  midis: [55, 59, 62], root: 43 }, // V
 ];
 
+// ---- song mode: the purpose layer ------------------------------------
+// Zones 0-10 = C4 D4 E4 G4 A4 C5 D5 E5 G5 A5 C6. hold=true: the target
+// stays until the user HOLDS the matching pitch 350ms (vs 120ms normal),
+// giving phrase endings weight. chord: the orchestra auto-follows with
+// that pad chord when the note becomes the target (the left hand keeps
+// swell/fist control; its chord zones rest during songs).
+const N = (z, o = {}) => ({ z, hold: !!o.hold, chord: o.chord || null });
+const SONGS = [
+  {
+    // Pentatonic adaptation: the original's F ("up a-bove the world so
+    // high") isn't in the C pentatonic set, so the second phrase lands on
+    // E5 instead — still instantly recognizable, never a wrong note.
+    title: 'Twinkle Twinkle',
+    notes: [
+      N(5, { chord: 'I' }), N(5), N(8), N(8), N(9), N(9), N(8, { hold: true }),
+      N(7, { chord: 'IV' }), N(7), N(6), N(6), N(5, { hold: true }),
+    ],
+  },
+  {
+    title: 'Mary Had a Little Lamb',
+    notes: [
+      N(2, { chord: 'I' }), N(1), N(0), N(1), N(2), N(2), N(2, { hold: true }),
+      N(1), N(1), N(1, { hold: true }),
+      N(2, { chord: 'V' }), N(3), N(3, { hold: true }),
+      N(2, { chord: 'I' }), N(1), N(0), N(1), N(2), N(2), N(2), N(2),
+      N(1), N(1), N(2), N(1), N(0, { hold: true }),
+    ],
+  },
+  {
+    title: 'Merrily We Roll Along',
+    notes: [
+      N(2, { chord: 'I' }), N(1), N(0), N(1), N(2), N(2), N(2, { hold: true }),
+      N(1, { chord: 'V' }), N(1), N(1, { hold: true }),
+      N(2, { chord: 'I' }), N(3), N(3, { hold: true }),
+      N(2), N(1), N(0, { hold: true }),
+    ],
+  },
+  {
+    // VERIFY-CAREFULLY: G4 C5 C5 C5 E5 D5 | C5 D5 E5 C5 C5 D5 |
+    // C5 A4 G4 A4 C5(hold) = "Should auld acquaintance be forgot / and
+    // never brought to mind / should auld acquaintance be forgot" in C
+    // major. Every note falls in the C pentatonic set (no F/B). Chords I/V/I.
+    title: 'Auld Lang Syne',
+    notes: [
+      N(3, { chord: 'I' }), N(5), N(5), N(5), N(7), N(6),
+      N(5, { chord: 'V' }), N(6), N(7), N(5), N(5), N(6),
+      N(5, { chord: 'I' }), N(4), N(3), N(4), N(5, { hold: true }),
+    ],
+  },
+];
+
 const overlay = document.getElementById('enter');
 const statusEl = document.getElementById('status');
 
@@ -46,6 +97,18 @@ let handsEverSeen = false;
 let rightLastSeen = -1e9;   // nowS of the last tracked right-hand frame
 let melodyLive = false;     // sustained voice has started this session
 const tmpColor = new THREE.Color();
+const tmpV = new THREE.Vector3();
+
+// ---- song mode state ---------------------------------------------------
+// onboarding -> select -> song -> complete -> (select | song | free).
+// Free play is the original conduct-anything mode; songs are the goal.
+let mode = 'onboarding';
+let songState = null;       // {songIdx, noteIdx, targetSince} while playing
+let curSongIdx = -1;
+let aimedOrb = -1;          // song-select orb under the right hand
+let lastNoteChangeT = -1e9; // FX throttle clock (audio time)
+const GOLD = new THREE.Color(0xffd76a);
+const PILLAR_COLS = [0x7fb2ff, 0x9fe8d0, 0xffd27f, 0xb79fff];
 
 // ---- guided onboarding (rewritten for the theremin mechanic) -----------
 // One large floating instruction at a time (reuses the prompt sprite at
@@ -79,9 +142,10 @@ function obAdvance(nowS) {
 function obNext(nowS) {
   ob.step++;
   if (ob.step >= OB_STEPS.length) {
-    ob.phase = 'conduct';
-    ob.until = nowS + 3.0;
-    visuals.setPromptText('Conduct.');
+    // Onboarding complete: into the songbook, not empty free play.
+    ob = null;
+    obDone = true;
+    enterSelect();
   } else {
     ob.phase = 'instr';
     visuals.setPromptText(OB_STEPS[ob.step].instr);
@@ -94,7 +158,7 @@ function obNext(nowS) {
 function obSkip() {
   ob = null;
   obDone = true;
-  visuals.hidePrompt();
+  enterFree(); // the skip gesture means "I know this, just let me play"
 }
 
 function obTick(nowS) {
@@ -106,11 +170,92 @@ function obTick(nowS) {
   // Step 1 (tiny movements): 4s of free explore, then auto-advance.
   if (ob.phase === 'instr' && ob.step === 1 && nowS >= ob.until) { obNext(nowS); return; }
   if (ob.phase === 'confirm' && nowS >= ob.until) obNext(nowS);
-  else if (ob.phase === 'conduct' && nowS >= ob.until) {
-    ob = null;
-    obDone = true;
-    visuals.hidePrompt();
+}
+
+// ---- song mode flow ----------------------------------------------------
+// After onboarding, the app asks "Choose a song" instead of dropping the
+// user into empty free play — the songbook is the purpose.
+function enterSelect() {
+  mode = 'select';
+  songState = null;
+  aimedOrb = -1;
+  visuals.setSongTarget(-1);
+  visuals.hideHud();
+  visuals.showSongSelect();
+  visuals.setPromptBig();
+  visuals.setPromptPos(0, 0.48, -1.4);
+  visuals.showPrompt();
+  visuals.setPromptText('Choose a song');
+}
+
+function enterFree() {
+  mode = 'free';
+  songState = null;
+  aimedOrb = -1;
+  visuals.hideSongSelect();
+  visuals.hideHud();
+  visuals.setSongTarget(-1);
+  visuals.setPromptPos(0, 0.18, -1.4);
+  visuals.hidePrompt();
+}
+
+function startSong(i) {
+  const S = SONGS[i];
+  curSongIdx = i;
+  mode = 'song';
+  songState = { songIdx: i, noteIdx: 0, targetSince: 0 };
+  aimedOrb = -1;
+  visuals.hideSongSelect();
+  visuals.hidePrompt();
+  visuals.setSongTarget(S.notes[0].z);
+  visuals.setHudText(`${S.title} — 1/${S.notes.length}`);
+  visuals.showHud();
+  if (S.notes[0].chord) audio.setAutoChord(S.notes[0].chord);
+}
+
+function advanceSong() {
+  const S = SONGS[songState.songIdx];
+  const done = S.notes[songState.noteIdx];
+  // Match reward: sparkle at the rung + soft high shimmer.
+  visuals.getRungWorldPos(done.z, tmpV);
+  visuals.spawnBurst(tmpV, GOLD, 16);
+  audio.playShimmer();
+  songState.noteIdx++;
+  songState.targetSince = 0;
+  if (songState.noteIdx >= S.notes.length) { completeSong(); return; }
+  const next = S.notes[songState.noteIdx];
+  visuals.setSongTarget(next.z);
+  visuals.setHudText(`${S.title} — ${songState.noteIdx + 1}/${S.notes.length}`);
+  if (next.chord) audio.setAutoChord(next.chord);
+}
+
+function completeSong() {
+  mode = 'complete';
+  songState = null;
+  visuals.setSongTarget(-1);
+  visuals.hideHud();
+  visuals.setPromptBig();
+  visuals.showPrompt();
+  visuals.setPromptText('Beautiful.');
+  // Celebration: 3 firework volleys across the pillars (burst pool reuse).
+  for (let v = 0; v < 3; v++) {
+    setTimeout(() => {
+      for (let i = 0; i < 4; i++) {
+        const p = visuals.pillars[i].position;
+        tmpV.set(p.x + (Math.random() - 0.5) * 0.8, 1.1 + Math.random() * 1.3, p.z + (Math.random() - 0.5) * 0.8);
+        tmpColor.set(PILLAR_COLS[i]);
+        visuals.spawnBurst(tmpV, tmpColor, 14);
+      }
+    }, v * 380);
   }
+  setTimeout(() => {
+    if (mode === 'complete') visuals.setPromptText('Pinch: replay • Hold pinch: next song');
+  }, 2600);
+}
+
+function nextSong() {
+  if (curSongIdx < SONGS.length - 1) startSong(curSongIdx + 1);
+  else enterSelect(); // past the last song, the "next" is the songbook
 }
 
 function setStatus(t) { statusEl.textContent = t; }
@@ -184,6 +329,15 @@ async function enter() {
     }
     rightLastSeen = -1e9;
     melodyLive = false;
+    // Song state resets; re-entry returns to the songbook hub (or to
+    // onboarding if it never completed).
+    songState = null;
+    aimedOrb = -1;
+    visuals.hideSongSelect();
+    visuals.hideHud();
+    visuals.setSongTarget(-1);
+    if (obDone) enterSelect();
+    else mode = 'onboarding';
     renderer.setAnimationLoop(null);
   });
   lastT = performance.now();
@@ -226,9 +380,17 @@ function handleRight(tr, ev, nowS) {
     noteHistory.push({ midi, t: now });
     noteHistory = noteHistory.filter(n => now - n.t < 8);
     if (noteHistory.length > 40) noteHistory.splice(0, noteHistory.length - 40);
-    visuals.spawnBurst(tr.pos, color);
-    visuals.spawnRipple(tr.pos, color);
-    visuals.flashPitchCursor();
+    // FX throttle (playtest-3 fix): during fast sweeps every quantization
+    // boundary fired full bursts+ripples and the screen flooded — and
+    // overlapping ripples at the hand read as a stray "∞" glyph. FX fire
+    // only when the previous quantized note was actually held >= 120ms.
+    // The ladder still tracks every change: immediate readout, no spam.
+    if (now - lastNoteChangeT >= 0.12) {
+      visuals.spawnBurst(tr.pos, color);
+      visuals.spawnRipple(tr.pos, color);
+      visuals.flashPitchCursor();
+    }
+    lastNoteChangeT = now;
     // Onboarding step 0: two quantized changes prove they hear the mapping.
     if (ob && ob.phase === 'instr' && ob.step === 0) {
       ob.count++;
@@ -236,12 +398,46 @@ function handleRight(tr, ev, nowS) {
     }
   }
 
-  // Onboarding skip: pinch-and-hold 1.5s jumps straight to free play.
-  if (ob && ev.pinchHeld) obSkip();
+  // Song mode: match the target pitch. Free tempo — no rhythm gating
+  // (accessibility); hold-notes need a 350ms dwell so endings carry weight.
+  if (mode === 'song' && songState) {
+    const target = SONGS[songState.songIdx].notes[songState.noteIdx];
+    if (ev.noteIdx === target.z) {
+      const dwell = target.hold ? 0.35 : 0.12;
+      if (!songState.targetSince) songState.targetSince = nowS;
+      else if (nowS - songState.targetSince >= dwell) advanceSong();
+    } else {
+      songState.targetSince = 0;
+    }
+  }
+
+  // Song select: aim by reaching toward an orb (nearest within 0.6m).
+  if (mode === 'select' && ev.tracked) {
+    let best = -1, bestD = 0.6;
+    const orbs = visuals.songOrbs;
+    for (let i = 0; i < orbs.length; i++) {
+      const d = tr.pos.distanceTo(orbs[i].pos);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    if (best !== aimedOrb) {
+      aimedOrb = best;
+      visuals.setOrbAim(best);
+    }
+  }
+
+  // Pinch-and-hold 1.5s: onboarding skip | select->free | complete->next.
+  if (ev.pinchHeld) {
+    if (ob) obSkip();
+    else if (mode === 'select') enterFree();
+    else if (mode === 'complete') nextSong();
+  }
 
   if (ev.pinched) {
     if (tr.pinchPosValid) visuals.pinchFlash(tr.pinchPos);
-    if (audio.looping) {
+    // In select/complete the tap action fires on RELEASE (below), so an
+    // engage here must not act — otherwise a hold would double-fire.
+    if (mode === 'select' || mode === 'complete') { /* release handles it */ }
+    else if (audio.looping) {
       audio.stopLoop();
       visuals.setLoop(false);
       visuals.showLoopLabel('loop cleared', 1.8);
@@ -260,26 +456,42 @@ function handleRight(tr, ev, nowS) {
       }
     }
   }
+
+  // Tap actions in select/complete fire on pinch RELEASE: a 1.5s hold means
+  // something else there, and release disambiguates tap from hold. (A hold
+  // already changed the mode by release time, so it can't double-fire.)
+  if (ev.pinchReleased) {
+    if (mode === 'select' && aimedOrb >= 0) {
+      if (aimedOrb >= SONGS.length) enterFree(); // the "Free play" orb
+      else startSong(aimedOrb);
+    } else if (mode === 'complete') {
+      startSong(curSongIdx); // replay
+    }
+  }
 }
 
 function handleLeft(tr, ev, nowS) {
-  // Chord zones: low = I, mid = vi, high = IV/V alternating per fresh entry.
-  const z = ev.zone;
-  let ci = chordIdx;
-  if (z === 0) ci = 0;
-  else if (z === 1) ci = 1;
-  else if (z === 2) {
-    if (z !== lastLeftZone) {
-      ci = highToggle ? 3 : 2;
-      highToggle = 1 - highToggle;
-    } else {
-      ci = chordIdx;
+  // In song mode the orchestra auto-follows the song's chords, so the
+  // left-hand chord zones rest — but palm swell and fist dampen stay live.
+  if (mode !== 'song') {
+    // Chord zones: low = I, mid = vi, high = IV/V alternating per fresh entry.
+    const z = ev.zone;
+    let ci = chordIdx;
+    if (z === 0) ci = 0;
+    else if (z === 1) ci = 1;
+    else if (z === 2) {
+      if (z !== lastLeftZone) {
+        ci = highToggle ? 3 : 2;
+        highToggle = 1 - highToggle;
+      } else {
+        ci = chordIdx;
+      }
     }
-  }
-  lastLeftZone = z;
-  if (ci !== chordIdx) {
-    chordIdx = ci;
-    audio.setChord(CHORDS[ci].midis, CHORDS[ci].root);
+    lastLeftZone = z;
+    if (ci !== chordIdx) {
+      chordIdx = ci;
+      audio.setChord(CHORDS[ci].midis, CHORDS[ci].root);
+    }
   }
   // Palm swell, ~120ms smoothing.
   const k = 1 - Math.exp(-dtG / 0.12);

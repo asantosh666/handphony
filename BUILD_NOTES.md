@@ -73,11 +73,74 @@ an empty room. The first two steps teach the continuous-pitch feel:
 3. "Open your left palm" → swell openness > 0.75 → "Your palm swells the strings"
 4. "Make a fist" → openness < 0.25 → "A fist hushes them"
 5. "Pinch thumb and finger" → loop captured → "You captured a loop" (pinching with <2 recent notes shows "Play a few notes first, then pinch" and stays on this step; if a loop was already captured earlier, the step auto-completes)
-6. "Conduct." for 3 s → fades → free play
+6. → the songbook: "Choose a song" (see Song mode below — free play is one
+   orb among the songs, not the default landing)
 
 Step-1 and confirmations show ~2 s. **Skip:** pinch-and-HOLD for 1.5 s at any
 point during onboarding jumps straight to free play (deliberately
 undocumented in the UI — it's an escape hatch, not a feature).
+
+## Song mode — the purpose layer (playtest 3: "what's the real purpose?")
+
+Playtest 3's verdict: the mechanics all worked, but the app was a toy with
+no goal. The purpose is now **play real songs with your bare hands** — a
+follow-the-light songbook. After onboarding, the user lands on song select,
+not empty free play.
+
+**The songs** (zones 0–10 = C4 D4 E4 G4 A4 C5 D5 E5 G5 A5 C6; `hold` notes
+need a 350 ms dwell vs 120 ms normal, giving phrase endings weight;
+`chord` auto-changes the pad via `audio.setAutoChord`, reusing the exact
+free-play voicings):
+
+1. **Twinkle Twinkle** — pentatonic adaptation: the original's F ("up above
+   the world so high") isn't in the C pentatonic set, so the second phrase
+   lands on E5 instead. Still instantly recognizable; never a wrong note.
+   Chords: I, then IV.
+2. **Mary Had a Little Lamb** — straight transcription (E D C D E E E…).
+   Chords: I, I, V, I.
+3. **Merrily We Roll Along** — straight transcription. Chords: I, V, I.
+4. **Auld Lang Syne** — VERIFY-CAREFULLY: G4 C5 C5 C5 E5 D5 | C5 D5 E5 C5 C5
+   D5 | C5 A4 G4 A4 C5(hold), i.e. "Should auld acquaintance be forgot / and
+   never brought to mind…" in C major. Every note falls in the C pentatonic
+   set (no F/B). Chords: I, V, I.
+
+**Song select:** 4 song orbs + a 5th "Free play" orb in a gentle arc at
+y≈0.10, z≈−1.15 (x spread ±0.55), each with a floating title label. The user
+reaches toward an orb — nearest within 0.6 m of the right hand is "aimed"
+(scales ×1.45, brightens) — and pinches to choose. Selection fires on pinch
+**RELEASE**, not engage: in select/complete screens a 1.5 s hold means
+something else, and release disambiguates tap from hold (a hold already
+changed the mode by release time, so it can't double-fire). Pinch-hold in
+select = free play. The melody voice stays live while choosing — noodling
+over the songbook is allowed.
+
+**Song play:** HUD top-center shows "Title — n/total". The target note's
+ladder rung pulses **gold**, stronger than the normal active-rung pulse
+(gold wins when target == the user's current rung). Matching the target
+pitch for the dwell advances the song: a sparkle burst at the rung + a soft
+high shimmer tone (G6+C7 sines, 0.5 s). Free tempo — no rhythm gating
+(accessibility). The orchestra auto-follows the song's chords; the left
+hand keeps swell/fist control but its chord zones rest during songs. Loop
+capture keeps working throughout (perform → pinch → your song loops — the
+shareable-performance seed).
+
+**Song complete:** "Beautiful." + a 3-volley firework across the pillars
+(reuses the burst pool), then "Pinch: replay • Hold pinch: next song".
+Pinch replays; pinch-hold advances to the next song — past the last song,
+"next" returns to the songbook. Session end resets song state; re-entry
+returns to the songbook hub.
+
+## Playtest-3 fixes (same build)
+
+- **The "∞" glyph** (~46–50 s in the test video): identified as overlapping
+  **ripple rings**. Every quantized note change fired a full burst + ripple,
+  so a fast sweep cycled the 10-ring pool rapidly at the hand position — two
+  offset expanding annuli read as a stray "∞". Fixed by the throttle below.
+- **Particle-spray throttle:** note-change FX (bursts, ripples, cursor
+  flash) now fire only when the previous quantized note was actually held
+  ≥ 120 ms. The ladder still tracks every change — immediate instrument
+  readout, no FX spam. Loop capture and note history are unaffected (they
+  record every change).
 
 ## What's in the scene
 

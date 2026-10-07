@@ -13,6 +13,15 @@
 export const PENT_MIDIS = [60, 62, 64, 67, 69, 72, 74, 76, 79, 81, 84]; // C4..C6
 export const NOTE_NAMES = ['C4', 'D4', 'E4', 'G4', 'A4', 'C5', 'D5', 'E5', 'G5', 'A5', 'C6'];
 
+// Named pad voicings for the song driver (auto-chords). Same consonant
+// triads as the free-play chord map: I=C, vi=Am, IV=F, V=G.
+export const CHORD_VOICINGS = {
+  I: { midis: [60, 64, 67], root: 48 },
+  vi: { midis: [57, 60, 64], root: 45 },
+  IV: { midis: [53, 57, 60], root: 41 },
+  V: { midis: [55, 59, 62], root: 43 },
+};
+
 export class AudioEngine {
   constructor() {
     this.ctx = null;
@@ -196,6 +205,33 @@ export class AudioEngine {
     }
     bus.gain.setTargetAtTime(0.5, t, 0.7); // slow bloom
     this.pad = { bus, oscs };
+  }
+
+  // Song driver: change the pad to a named chord (I/vi/IV/V).
+  // Reuses the exact pad voicings above — the orchestra follows the song.
+  setAutoChord(sym) {
+    const v = CHORD_VOICINGS[sym];
+    if (v) this.setChord(v.midis, v.root);
+  }
+
+  // Soft high shimmer (G6 + C7 sines, 0.5s): the reward tone when a song
+  // note is matched. Quiet by design — it kisses the melody, not covers it.
+  playShimmer() {
+    if (!this.ready) return;
+    const c = this.ctx, t = c.currentTime;
+    for (const [f, g0] of [[1568.0, 0.055], [2093.0, 0.035]]) {
+      const o = c.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = f;
+      const g = c.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(g0, t + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.5);
+      o.connect(g);
+      g.connect(this.master);
+      o.start(t);
+      o.stop(t + 0.6);
+    }
   }
 
   // Palm openness 0..1 -> pad lowpass cutoff + pad/bass level. Smoothed.
