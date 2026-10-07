@@ -100,16 +100,18 @@ const tmpColor = new THREE.Color();
 const tmpV = new THREE.Vector3();
 
 // ---- song mode state ---------------------------------------------------
-// onboarding -> select -> song -> complete -> (select | song | free).
-// Free play is the original conduct-anything mode; songs are the goal.
-// The songbook is the hub: every path out of a session lands here.
+// onboarding -> Twinkle auto-start -> complete -> songbook hub.
+// Free play is the conduct-anything mode; the songbook is the hub every
+// path returns to. The orb-selection step was REMOVED from the critical
+// path (playtest 5: "pinch the golden orb but there's no golden orb") —
+// nobody aims before their first song.
 let mode = 'onboarding';
 let songState = null;       // {songIdx, noteIdx, targetSince} while playing
 let curSongIdx = -1;
 let aimedOrb = -1;          // song-select orb under the right hand
 let lastNoteChangeT = -1e9; // FX throttle clock (audio time)
-let selectPromptText = 'Choose a song'; // current songbook prompt (restored after hints)
-let selectHintUntil = 0;    // nowS deadline for the pinch-hold hint flash
+let selectPromptText = 'Choose a song'; // current songbook prompt
+let songIntroUntil = 0;     // nowS deadline for "Follow the golden light"
 let freeIntroShown = false; // one-time loop intro per session
 let freeIntroUntil = 0;     // nowS deadline for the free-play intro
 // Pinch disambiguation: a 1.5s hold means something different from a tap
@@ -126,9 +128,9 @@ const PILLAR_COLS = [0x7fb2ff, 0x9fe8d0, 0xffd27f, 0xb79fff];
 // 1.6x). Starts on the first frame with a tracked hand — never at an
 // empty room. The first two steps teach the continuous-pitch feel:
 // move and HEAR the mapping, then explore tiny movements. The loop is
-// NOT taught here: onboarding ends at the songbook (the purpose), and
-// the loop gets a one-time intro inside free play instead. Skip:
-// pinch-and-HOLD 1.5s -> straight to the songbook.
+// NOT taught here: onboarding ends with Twinkle Twinkle auto-starting
+// (the purpose), and the loop gets a one-time intro inside free play
+// instead. Skip: pinch-and-HOLD 1.5s -> Twinkle Twinkle auto-starts too.
 let ob = null;    // {step, phase, until, count, noteUntil}
 let obDone = false;
 const OB_STEPS = [
@@ -154,11 +156,9 @@ function obAdvance(nowS) {
 function obNext(nowS) {
   ob.step++;
   if (ob.step >= OB_STEPS.length) {
-    // Onboarding complete: into the songbook (first visit — the Twinkle
-    // orb pulses and the prompt says what to do), never empty free play.
-    ob = null;
-    obDone = true;
-    enterSelect(true);
+    // Onboarding complete: Twinkle Twinkle auto-starts — zero decisions,
+    // zero aiming. The first thing a new user does is play a song.
+    autoStartFirstSong(nowS);
   } else {
     ob.phase = 'instr';
     visuals.setPromptText(OB_STEPS[ob.step].instr);
@@ -166,10 +166,23 @@ function obNext(nowS) {
   }
 }
 
-function obSkip() {
+function obSkip(nowS) {
+  // Skipping the tutorial still lands in the song, not the songbook.
+  autoStartFirstSong(nowS);
+}
+
+// Twinkle Twinkle auto-starts after onboarding: "Follow the golden
+// light" (3s, then fade), HUD "Twinkle Twinkle — 1/12", target rung
+// pulsing gold. No orb selection on the critical path.
+function autoStartFirstSong(nowS) {
   ob = null;
   obDone = true;
-  enterSelect(true); // skipping the tutorial still lands in the songbook
+  startSong(0);
+  visuals.setPromptBig();
+  visuals.setPromptPos(0, 0.48, -1.4);
+  visuals.showPrompt();
+  visuals.setPromptText('Follow the golden light');
+  songIntroUntil = nowS + 3.0;
 }
 
 function obTick(nowS) {
@@ -184,35 +197,31 @@ function obTick(nowS) {
 }
 
 // ---- song mode flow ----------------------------------------------------
-// After onboarding, the app asks "Choose a song" instead of dropping the
-// user into empty free play — the songbook is the purpose. First visit
-// (straight out of onboarding): the Twinkle Twinkle orb pulses and the
-// prompt tells the hand exactly what to do.
-function enterSelect(first = false) {
+// The songbook is the hub: reached after song 1 (via next-song past the
+// last song, or pinch-hold mid-song), from free play, or on session
+// re-entry. First-time visitors get a one-time "Pinch an orb to choose"
+// prompt; the Twinkle orb keeps its gold pulse whenever the songbook
+// shows, so the flagship song stays findable.
+let songbookSeen = false;
+function enterSelect() {
   mode = 'select';
   songState = null;
   aimedOrb = -1;
   pendingSongPinch = false;
   pinchHoldConsumed = false;
-  selectHintUntil = 0;
+  songIntroUntil = 0;
   freeIntroUntil = 0;
   visuals.setSongTarget(-1);
   visuals.hideHud();
   visuals.hidePrompt();
   visuals.showSongSelect();
-  visuals.setOrbPulse(first ? 0 : -1);
-  selectPromptText = first ? 'Pinch the golden orb' : 'Choose a song';
+  visuals.setOrbPulse(0);
+  selectPromptText = songbookSeen ? 'Choose a song' : 'Pinch an orb\nto choose';
+  songbookSeen = true;
   visuals.setPromptBig();
   visuals.setPromptPos(0, 0.48, -1.4);
   visuals.showPrompt();
   visuals.setPromptText(selectPromptText);
-}
-
-// Pinch-hold in the songbook is NOT a skip: it flashes a hint. Free play
-// is reachable ONLY through its orb — no silent exits from the purpose.
-function flashSelectHint(nowS) {
-  visuals.setPromptText('Release on a song to choose');
-  selectHintUntil = nowS + 1.6;
 }
 
 function enterFree(nowS) {
@@ -221,7 +230,6 @@ function enterFree(nowS) {
   aimedOrb = -1;
   pendingSongPinch = false;
   pinchHoldConsumed = false;
-  selectHintUntil = 0;
   visuals.hideSongSelect();
   visuals.hideHud();
   visuals.setSongTarget(-1);
@@ -247,7 +255,6 @@ function startSong(i) {
   aimedOrb = -1;
   pendingSongPinch = false;
   pinchHoldConsumed = false;
-  selectHintUntil = 0;
   freeIntroUntil = 0;
   visuals.hideSongSelect();
   visuals.hidePrompt();
@@ -381,7 +388,6 @@ async function enter() {
     aimedOrb = -1;
     pendingSongPinch = false;
     pinchHoldConsumed = false;
-    selectHintUntil = 0;
     freeIntroUntil = 0;
     freeIntroShown = false; // the loop intro shows again next session
     visuals.hideSongSelect();
@@ -462,9 +468,9 @@ function handleRight(tr, ev, nowS) {
     }
   }
 
-  // Song select: aim by reaching toward an orb (nearest within 0.6m).
+  // Song select: aim by reaching toward an orb (nearest within 0.8m).
   if (mode === 'select' && ev.tracked) {
-    let best = -1, bestD = 0.6;
+    let best = -1, bestD = 0.8;
     const orbs = visuals.songOrbs;
     for (let i = 0; i < orbs.length; i++) {
       const d = tr.pos.distanceTo(orbs[i].pos);
@@ -476,47 +482,60 @@ function handleRight(tr, ev, nowS) {
     }
   }
 
-  // Pinch-and-hold 1.5s map (unambiguous only):
-  //   onboarding -> skip to the songbook (first visit)
-  //   select     -> hint only (free play is orb-only; no silent skip)
-  //   song       -> quit mid-song back to the songbook (there was no exit)
+  // Pinch-and-hold 1.5s map:
+  //   onboarding -> skip straight to Twinkle Twinkle (auto-start)
+  //   select     -> free play, but ONLY if no orb was aimed at engage
+  //                 (an aimed engage already selected and consumed it)
+  //   song       -> quit mid-song back to the songbook
   //   free       -> back to the songbook (matches the free-play intro)
   //   complete   -> next song (existing)
   if (ev.pinchHeld) {
-    pinchHoldConsumed = true; // the release after a hold must not also tap
-    pendingSongPinch = false; // a hold is not a tap: discard the deferred toggle
-    if (ob) obSkip();
-    else if (mode === 'select') flashSelectHint(nowS);
-    else if (mode === 'complete') nextSong();
-    else if (mode === 'song' || mode === 'free') enterSelect();
+    if (pinchHoldConsumed) {
+      // This engagement already acted (e.g. songbook engage-select):
+      // the hold that follows it is inert.
+    } else {
+      pinchHoldConsumed = true; // the release after a hold must not tap
+      pendingSongPinch = false; // a hold is not a tap: discard the deferred toggle
+      if (ob) obSkip(nowS);
+      else if (mode === 'select') enterFree(nowS); // hold, no orb aimed = free play
+      else if (mode === 'complete') nextSong();
+      else if (mode === 'song' || mode === 'free') enterSelect();
+    }
   }
 
   if (ev.pinched) {
-    // In song mode the loop toggle is DEFERRED to release: a quick pinch
-    // captures/clears, a hold quits to the songbook — acting at engage
-    // would do both. Everywhere else the engage acts immediately.
-    if (mode === 'song') {
+    if (mode === 'select') {
+      // Engage selects IMMEDIATELY (instant feedback — no aim+release
+      // two-step). A continued hold is consumed so it can't double-fire
+      // or trigger anything else. With no orb aimed, the gesture stays
+      // unconsumed: a continued hold falls through to free play above.
+      if (aimedOrb >= 0) {
+        if (tr.pinchPosValid) visuals.pinchFlash(tr.pinchPos);
+        if (aimedOrb >= SONGS.length) enterFree(nowS); // the "Free play" orb
+        else startSong(aimedOrb);
+        pinchHoldConsumed = true; // suppress the hold/release after this
+      }
+    } else if (mode === 'song') {
+      // Loop toggle DEFERRED to release: a quick pinch captures/clears,
+      // a hold quits to the songbook — acting at engage would do both.
       pendingSongPinch = true;
       pendingPinchValid = tr.pinchPosValid;
       if (tr.pinchPosValid) pendingPinchPos.copy(tr.pinchPos);
     } else {
       if (tr.pinchPosValid) visuals.pinchFlash(tr.pinchPos);
-      // In select/complete the tap action fires on RELEASE (below), so an
+      // In complete the tap action fires on RELEASE (below), so an
       // engage here must not act — otherwise a hold would double-fire.
-      if (mode === 'select' || mode === 'complete') { /* release handles it */ }
+      if (mode === 'complete') { /* release handles replay */ }
       else doLoopToggle();
     }
   }
 
-  // Tap actions fire on pinch RELEASE: a 1.5s hold means something else in
-  // select/song/complete, and release disambiguates tap from hold. A hold
+  // Tap actions fire on pinch RELEASE (complete = replay; song = deferred
+  // loop toggle). Select mode acts at ENGAGE, never at release. A hold
   // sets pinchHoldConsumed, so the release after it can never double-fire.
   if (ev.pinchReleased) {
     if (pinchHoldConsumed) {
       pinchHoldConsumed = false;
-    } else if (mode === 'select' && aimedOrb >= 0) {
-      if (aimedOrb >= SONGS.length) enterFree(nowS); // the "Free play" orb
-      else startSong(aimedOrb);
     } else if (mode === 'complete') {
       startSong(curSongIdx); // replay
     } else if (mode === 'song' && pendingSongPinch) {
@@ -614,10 +633,11 @@ function tick(time, frame) {
     // Onboarding starts on the first frame with a tracked hand.
     if (!ob && !obDone && handsEverSeen) obStart();
     if (ob) obTick(nowS);
-    // Songbook pinch-hold hint: flash, then restore the mode's prompt.
-    if (mode === 'select' && selectHintUntil && nowS >= selectHintUntil) {
-      selectHintUntil = 0;
-      visuals.setPromptText(selectPromptText);
+    // "Follow the golden light" intro after auto-start: 3s, then fade.
+    // Guarded on mode so a mid-intro quit can't hide a songbook prompt.
+    if (songIntroUntil && nowS >= songIntroUntil) {
+      songIntroUntil = 0;
+      if (mode === 'song') visuals.hidePrompt();
     }
     // Free-play loop intro: show once, then get out of the way.
     if (mode === 'free' && freeIntroUntil && nowS >= freeIntroUntil) {

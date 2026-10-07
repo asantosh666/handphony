@@ -6,6 +6,9 @@ import * as THREE from 'three';
 import { NOTE_NAMES } from './audio.js';
 import { HAND_BONES } from './hands.js';
 
+// White-hot lerp target for the aimed song orb's unmistakable highlight.
+const WHITE = new THREE.Color(0xffffff);
+
 function canvasTexture(w, h, draw) {
   const cv = document.createElement('canvas');
   cv.width = w; cv.height = h;
@@ -585,9 +588,9 @@ export class Visuals {
   }
 
   // ---- song select: 4 song orbs + a free-play orb in a gentle arc -----
-  // The user reaches toward an orb (nearest within 0.6m = aimed) and
-  // pinches on RELEASE to choose — release (not engage) so a 1.5s hold
-  // can mean free-play instead of double-firing a selection.
+  // The user reaches toward an orb (nearest within 0.8m = aimed) and
+  // pinches at ENGAGE to choose — immediate feedback, no release two-step.
+  // A 1.5s hold with no orb aimed falls through to free play instead.
   buildSongSelect() {
     this.songSelect = new THREE.Group();
     this.songOrbs = [];
@@ -606,12 +609,12 @@ export class Visuals {
         blending: THREE.AdditiveBlending, depthWrite: false,
       }));
       spr.position.copy(pos);
-      spr.scale.set(0.16, 0.16, 1);
+      spr.scale.set(0.22, 0.22, 1);
       this.songSelect.add(spr);
       const label = this.makeLabel(d.title, 640, 40, 0.42, 0.084, 'rgba(232,236,255,0.92)');
-      label.position.set(pos.x, pos.y + 0.17, pos.z);
+      label.position.set(pos.x, pos.y + 0.22, pos.z);
       this.songSelect.add(label);
-      this.songOrbs.push({ idx: i, pos, sprite: spr, base: 0.16, phase: i * 1.3 });
+      this.songOrbs.push({ idx: i, pos, sprite: spr, base: 0.22, baseColor: new THREE.Color(d.color), phase: i * 1.3 });
     });
     this.songSelect.visible = false;
     this.scene.add(this.songSelect);
@@ -681,17 +684,19 @@ export class Visuals {
       m.color.set(0xffd76a);
       m.opacity = 0.78 + 0.22 * Math.sin(this.time * 9);
     }
-    // Song-select orbs breathe gently; the aimed orb glows bigger; the
-    // first-visit guide orb (Twinkle) pulses on its own so new users know
-    // where to pinch.
+    // Song-select orbs breathe gently; the aimed orb glows bigger with a
+    // white-hot core, unmistakable; the guide orb (Twinkle) pulses gold so
+    // the flagship song stays findable whenever the songbook shows.
     if (this.songSelect.visible) {
       for (const o of this.songOrbs) {
         const bump = 1 + 0.08 * Math.sin(this.time * 2.4 + o.phase);
-        const aim = (o.idx === this.aimedOrb) ? 1.45 : 1.0;
+        const aimed = (o.idx === this.aimedOrb);
+        const aim = aimed ? 1.6 : 1.0;
         const guide = (o.idx === this.pulseOrb) ? 1 + 0.22 * Math.sin(this.time * 5) : 1.0;
         const s = o.base * bump * aim * guide;
         o.sprite.scale.set(s, s, 1);
-        o.sprite.material.opacity = (o.idx === this.aimedOrb || o.idx === this.pulseOrb) ? 1.0 : 0.85;
+        o.sprite.material.opacity = (aimed || o.idx === this.pulseOrb) ? 1.0 : 0.85;
+        o.sprite.material.color.copy(o.baseColor).lerp(WHITE, aimed ? 0.55 : 0);
       }
     }
     // Pitch-cursor flash decay.
